@@ -1,0 +1,38 @@
+services:
+  db:
+    image: ankane/pgvector:latest
+    container_name: rfp_postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: brian_admin
+      POSTGRES_PASSWORD: my_secure_password123
+      POSTGRES_DB: rfp_proposal_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data:Z  # Added :Z for Podman SELinux permission handling
+    networks:
+      - app-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.backend
+    container_name: fastapi_backend_app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/code:Z  # Added :Z for Podman volume mounting security layers
+    environment:
+      - DATABASE_URL=postgresql://brian_admin:my_secure_password123@db:5432/rfp_proposal_db
+    depends_on:
+      - db
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+
+networks:
+  app-network:
+    driver: bridge
