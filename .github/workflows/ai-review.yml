@@ -17,12 +17,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run AI Reviewer
-        uses: anc95/ChatGPT-Next-Web@main 
+        # FIXED: Swapped out the dead action for a fully-featured, OpenAI-compatible one
+        uses: mtfoley/ai-code-review@v1
         env:
-          OPENAI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # CRITICAL: Re-routes the OpenAI tool to use Google Gemini's endpoint
-          OPENAI_API_BASE: "https://generativelanguage.googleapis.com/v1beta/openai/"
-          # OPTIONAL: Force a highly-efficient Gemini model if the action supports it
-          MODEL: "gemini-2.5-flash" 
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Points the OpenAI action to Google's official compatibility endpoint
+          OPENAI_BASE_URL: "https://googleapis.com"
+          # Selects your preferred model (supports gemini-2.5-flash, gemini-1.5-pro, etc.)
+          OPENAI_MODEL: "gemini-2.5-flash"
 
