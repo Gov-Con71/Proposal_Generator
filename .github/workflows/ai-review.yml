@@ -1,0 +1,29 @@
+name: AI Pull Request Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  workflow_dispatch: # Allows you to manually click a button to run it!
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Run AI Reviewer
+        # FIXED: Swapped out the dead action for a fully-featured, OpenAI-compatible one
+        uses: mtfoley/ai-code-review@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Points the OpenAI action to Google's official compatibility endpoint
+          OPENAI_BASE_URL: "https://googleapis.com"
+          # Selects your preferred model (supports gemini-2.5-flash, gemini-1.5-pro, etc.)
+          OPENAI_MODEL: "gemini-2.5-flash"
+

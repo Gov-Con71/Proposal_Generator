@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /code
+
+# Install required system tools for compiling database drivers
+RUN apt-get update && apt-get install -y libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+
+# Copy dependency list and install them
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade -r requirements.txt
+
+# CRITICAL FIX: Copy everything from your current folder (backend/) into the container (/code)
+COPY . .
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

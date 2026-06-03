@@ -1,0 +1,53 @@
+# Byte-code files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+develop-eggs/
+*.egg-info/
+.eggs/
+
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Editors
+.vscode/        # VS Code
+.idea/          # IntelliJ IDEA
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Logs and Data
+*.log
+*.sqlite3
+*.db
+
+# Tests
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Docker
+*.dockerignore
+
+# Temporary files
+*~
+.#*
+.terraform
+*.tfstate
+*.tfstate.*
