@@ -6,18 +6,30 @@ class ProposalService:
         self.db_url = db_url
 
     def create_rfp_record(self, proposal_in: ProposalCreate) -> dict:
-        """Executes actual business persistence logic."""
+        """Executes business persistence logic matching the streamlined schema."""
         connection = psycopg2.connect(self.db_url)
         cursor = connection.cursor()
         
-        # Simulating file registration sequence inside Postgres
+        # Updated to map exactly to your new table parameters (using uploaded_by instead of workspace)
         query = """
-        INSERT INTO rfp_documents (workspace_id, file_name, s3_storage_key, processing_status)
-        VALUES (%s, %s, %s, 'pending') RETURNING rfp_id, file_name, processing_status;
+        INSERT INTO rfp_documents (uploaded_by, file_name, s3_storage_key, processing_status)
+        VALUES (%s, %s, %s, 'pending') 
+        RETURNING rfp_id, file_name, processing_status;
         """
-        dummy_s3_key = f"uploads/{proposal_in.workspace_id}/{proposal_in.file_name}"
         
-        cursor.execute(query, (str(proposal_in.workspace_id), proposal_in.file_name, dummy_s3_key))
+        # Updated your S3 key mapping strategy to group files cleanly by user_id instead of workspace
+        dummy_s3_key = f"uploads/{proposal_in.uploaded_by}/{proposal_in.file_name}"
+        
+        # CRITICAL FIX: Wrapped query parameters inside a tuple context ( ... ) 
+        # so psycopg2 parses the variables matching the %s sequence parameters safely.
+        cursor.execute(
+            query, 
+            (
+                str(proposal_in.uploaded_by) if proposal_in.uploaded_by else None, 
+                proposal_in.file_name, 
+                dummy_s3_key
+            )
+        )
         record = cursor.fetchone()
         
         connection.commit()
