@@ -403,8 +403,10 @@ def write_report(
     )
     report_text = "\n".join(body)
 
-    # Overwrite the log file with the final structured report
-    LOG_FILE.write_text(report_text + "\n")
+    # Write the final structured report to a separate file to avoid truncating a file
+    # that is still open by the logging.FileHandler.
+    report_file = LOG_FILE.with_name(LOG_FILE.stem + "_report.log")
+    report_file.write_text(report_text + "\n")
 
     JSON_FILE.write_text(
         json.dumps(
@@ -417,7 +419,7 @@ def write_report(
         )
     )
 
-    log.info("Report written to %s", LOG_FILE)
+    log.info("Report written to %s", report_file)
     log.info("JSON data written to %s", JSON_FILE)
 
 
