@@ -29,8 +29,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-# Load .env from the backend directory, wherever the script is invoked from
-load_dotenv(Path(__file__).parents[2] / ".env")
+# Load .env from the repository root (two levels above this file), wherever the script is invoked from
 
 
 # ---------------------------------------------------------------------------
