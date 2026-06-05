@@ -340,8 +340,8 @@ def _extraction_section(results: list[ExtractionResult]) -> list[str]:
             lines += [
                 "## EXTRACTION COMPARISON",
                 f"  Speed winner      : {winner}",
-                f"  Speed ratio       : {max(speedup, 1/speedup):.2f}x  "
-                f"({'  {a.library} faster' if a.elapsed_seconds < b.elapsed_seconds else f'  {b.library} faster'})",
+                f"  Speed ratio       : {max(speedup, 1 / speedup):.2f}x  "
+                f"({a.library if a.elapsed_seconds < b.elapsed_seconds else b.library} faster)",
                 f"  Char delta        : {abs(a.char_count - b.char_count):,} chars",
                 f"  Word delta        : {abs(a.word_count - b.word_count):,} words",
                 f"  Noise delta       : {abs(a.noise_ratio - b.noise_ratio):.4f}",
