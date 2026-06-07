@@ -16,7 +16,7 @@ CREATE TABLE users (
 -- Create RFP Documents Table (The uploaded files tracked in S3)
 CREATE TABLE rfp_documents (
     rfp_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    uploaded_by UUID REFERENCES users(user_id) ON DELETE SET NULL,
+    uploaded_by UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     file_name VARCHAR(255) NOT NULL,
     s3_storage_key VARCHAR(512) NOT NULL, -- Points to the raw file resting inside AWS S3
     processing_status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'parsing', 'completed', 'failed'
