@@ -1,16 +1,17 @@
 from pydantic import BaseModel
+from typing import Optional
 from uuid import UUID
 
-# Contract when user uploads metadata
+# This defines what the test payload must contain
 class ProposalCreate(BaseModel):
     file_name: str
-    workspace_id: UUID
+    uploaded_by: UUID
 
-# Contract when system returns structured proposal state
+# This defines what the database service must return to the test client
 class ProposalResponse(BaseModel):
     rfp_id: UUID
     file_name: str
     processing_status: str
 
-    class Config:
-        from_attributes = True
+    # Pydantic V2 syntax compatibility
+    model_config = {"from_attributes": True}
