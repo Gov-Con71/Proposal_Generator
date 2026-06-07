@@ -5,7 +5,7 @@ from uuid import UUID
 # This defines what the test payload must contain
 class ProposalCreate(BaseModel):
     file_name: str
-    uploaded_by: Optional[UUID] = None
+    uploaded_by: UUID
 
 # This defines what the database service must return to the test client
 class ProposalResponse(BaseModel):
