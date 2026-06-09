@@ -1,0 +1,171 @@
+'use client'
+import { useState, useCallback } from 'react'
+import { useRouter } from 'next/navigation'
+import { useDropzone } from 'react-dropzone'
+import { CloudUpload, FileText, CheckCircle2, Trash2, ArrowLeft } from 'lucide-react'
+import Link from 'next/link'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+// Remove: import { Select } from '@/components/ui/input'
+import { Card, StepIndicator } from '@/components/ui/card'
+import { cn } from '@/lib/utils/cn'
+import { formatFileSize } from '@/lib/utils/format'
+import type { Step } from '@/components/ui/card'
+
+const STEPS: Step[] = [
+  { label: 'Upload RFP', status: 'active' },
+  { label: 'Analyze',    status: 'pending' },
+  { label: 'Outline',    status: 'pending' },
+  { label: 'Review',     status: 'pending' },
+]
+
+const CONTRACT_TYPES = [
+  { value: 'ffp',  label: 'Firm Fixed Price (FFP)' },
+  { value: 'cpff', label: 'Cost Plus Fixed Fee (CPFF)' },
+  { value: 'tm',   label: 'Time & Materials (T&M)' },
+  { value: 'idiq', label: 'IDIQ' },
+]
+
+export default function UploadPage() {
+  const router = useRouter()
+  const [file, setFile] = useState<File | null>(null)
+  const [form, setForm] = useState({
+    title: 'Enterprise Cloud Migration & Support Services',
+    agency: 'Department of Defense (DoD)',
+    solicitationNumber: 'FA823-24-R-0012',
+    deadline: '2026-11-14',
+    contractType: 'ffp',
+    naicsCode: '541512 - Computer Systems Design Services',
+  })
+
+  const onDrop = useCallback((accepted: File[]) => {
+    if (accepted[0]) setFile(accepted[0])
+  }, [])
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: { 'application/pdf': ['.pdf'], 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'], 'text/plain': ['.txt'] },
+    maxFiles: 1,
+    maxSize: 50 * 1024 * 1024,
+  })
+
+  function update(key: string, value: string) {
+    setForm((f) => ({ ...f, [key]: value }))
+  }
+
+  return (
+    <div className="content-narrow">
+      <Link href="/dashboard" className="inline-flex items-center gap-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] mb-4 transition-colors">
+        <ArrowLeft className="w-3.5 h-3.5" /> Back to dashboard
+      </Link>
+
+      <StepIndicator steps={STEPS} className="mb-6" />
+
+      {/* Upload zone */}
+      <Card className="mb-4">
+        <div
+          {...getRootProps()}
+          className={cn(
+            'border border-dashed rounded-lg p-10 text-center cursor-pointer transition-colors',
+            isDragActive
+              ? 'border-primary-600 bg-primary-50'
+              : 'border-[var(--border-default)] hover:border-primary-600 hover:bg-[var(--bg-secondary)]'
+          )}
+        >
+          <input {...getInputProps()} />
+          <div className="w-12 h-12 rounded-full bg-primary-50 flex items-center justify-center mx-auto mb-3">
+            <CloudUpload className="w-6 h-6 text-primary-600" />
+          </div>
+          <p className="text-sm font-medium text-[var(--text-primary)] mb-1">
+            Drop your RFP, RFQ or SOW here
+          </p>
+          <p className="text-xs text-[var(--text-tertiary)] mb-3">PDF, DOCX, or TXT files up to 50MB</p>
+          <Button variant="default" size="sm">Browse files</Button>
+        </div>
+
+        {file && (
+          <div className="flex items-center gap-3 mt-3 px-3 py-2.5 bg-[var(--bg-secondary)] rounded-lg border border-[var(--border-subtle)]">
+            <FileText className="w-5 h-5 text-danger-600 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium truncate">{file.name}</p>
+              <p className="text-[10px] text-[var(--text-tertiary)]">{formatFileSize(file.size)}</p>
+            </div>
+            <CheckCircle2 className="w-4 h-4 text-success-400 shrink-0" />
+            <button onClick={() => setFile(null)} className="text-[var(--text-tertiary)] hover:text-danger-600 transition-colors">
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* Demo: show pre-loaded file if none uploaded */}
+        {!file && (
+          <div className="flex items-center gap-3 mt-3 px-3 py-2.5 bg-[var(--bg-secondary)] rounded-lg border border-[var(--border-subtle)]">
+            <FileText className="w-5 h-5 text-danger-600 shrink-0" />
+            <div className="flex-1">
+              <p className="text-xs font-medium">RFP_823-A.pdf</p>
+              <p className="text-[10px] text-[var(--text-tertiary)]">1.4 MB</p>
+            </div>
+            <CheckCircle2 className="w-4 h-4 text-success-400 shrink-0" />
+            <button className="text-[var(--text-tertiary)] hover:text-danger-600 transition-colors">
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+      </Card>
+
+      {/* Auto-detected solicitation details */}
+      <Card className="mb-6">
+        <h3 className="text-sm font-medium mb-0.5">Solicitation details <span className="font-normal text-[var(--text-tertiary)]">(auto-detected)</span></h3>
+        <p className="text-xs text-[var(--text-tertiary)] mb-4">Review the extracted information below to ensure accuracy for AI compliance mapping.</p>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2">
+            <Input label="Title" value={form.title} onChange={(e) => update('title', e.target.value)} />
+          </div>
+          <Input label="Agency" value={form.agency} onChange={(e) => update('agency', e.target.value)} />
+          <Input label="Solicitation #" value={form.solicitationNumber} onChange={(e) => update('solicitationNumber', e.target.value)} />
+          <Input label="Deadline" type="date" value={form.deadline} onChange={(e) => update('deadline', e.target.value)} />
+          
+          {/* Replace Select with native select */}
+          <div>
+            <label className="block text-xs font-medium text-[var(--text-primary)] mb-1">
+              Contract type
+            </label>
+            <select 
+              value={form.contractType} 
+              onChange={(e) => update('contractType', e.target.value)}
+              className="w-full px-2 py-1.5 text-xs border border-[var(--border-default)] rounded-md bg-[var(--bg-primary)]"
+            >
+              {CONTRACT_TYPES.map(option => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          
+          <div className="col-span-2">
+            <Input label="NAICS Code" value={form.naicsCode} onChange={(e) => update('naicsCode', e.target.value)} />
+          </div>
+        </div>
+
+        {/* AI confidence note */}
+        <div className="flex items-center gap-2 mt-4 px-3 py-2 bg-primary-50 rounded-lg">
+          <div className="w-5 h-5 rounded-full bg-primary-600 flex items-center justify-center shrink-0">
+            <span className="text-[9px] text-white font-bold">AI</span>
+          </div>
+          <p className="text-xs text-primary-800">AI Extraction Complete — 98.2% confidence score for auto-detected metadata.</p>
+        </div>
+      </Card>
+
+      <div className="flex justify-between">
+        <Button variant="default" asChild>
+          <Link href="/dashboard">Cancel</Link>
+        </Button>
+        <Button variant="primary" icon={<ArrowLeft className="w-3.5 h-3.5 rotate-180" />} iconPosition="right" onClick={() => router.push('/proposals/new/analyze')}>
+          Continue to Analysis
+        </Button>
+      </div>
+    </div>
+  )
+}
