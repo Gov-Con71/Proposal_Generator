@@ -6,7 +6,7 @@ import { CloudUpload, FileText, CheckCircle2, Trash2, ArrowLeft } from 'lucide-r
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Select } from '@/components/ui/input'
+// Remove: import { Select } from '@/components/ui/input'
 import { Card, StepIndicator } from '@/components/ui/card'
 import { cn } from '@/lib/utils/cn'
 import { formatFileSize } from '@/lib/utils/format'
@@ -122,10 +122,28 @@ export default function UploadPage() {
           <div className="col-span-2">
             <Input label="Title" value={form.title} onChange={(e) => update('title', e.target.value)} />
           </div>
-          <Input label="Agency"              value={form.agency}             onChange={(e) => update('agency', e.target.value)} />
-          <Input label="Solicitation #"      value={form.solicitationNumber} onChange={(e) => update('solicitationNumber', e.target.value)} />
-          <Input label="Deadline" type="date" value={form.deadline}         onChange={(e) => update('deadline', e.target.value)} />
-          <Select label="Contract type" options={CONTRACT_TYPES} value={form.contractType} onChange={(e) => update('contractType', e.target.value)} />
+          <Input label="Agency" value={form.agency} onChange={(e) => update('agency', e.target.value)} />
+          <Input label="Solicitation #" value={form.solicitationNumber} onChange={(e) => update('solicitationNumber', e.target.value)} />
+          <Input label="Deadline" type="date" value={form.deadline} onChange={(e) => update('deadline', e.target.value)} />
+          
+          {/* Replace Select with native select */}
+          <div>
+            <label className="block text-xs font-medium text-[var(--text-primary)] mb-1">
+              Contract type
+            </label>
+            <select 
+              value={form.contractType} 
+              onChange={(e) => update('contractType', e.target.value)}
+              className="w-full px-2 py-1.5 text-xs border border-[var(--border-default)] rounded-md bg-[var(--bg-primary)]"
+            >
+              {CONTRACT_TYPES.map(option => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          
           <div className="col-span-2">
             <Input label="NAICS Code" value={form.naicsCode} onChange={(e) => update('naicsCode', e.target.value)} />
           </div>

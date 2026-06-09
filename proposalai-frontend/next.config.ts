@@ -1,6 +1,7 @@
 import type { NextConfig } from 'next'
 
 const nextConfig: NextConfig = {
+  output: 'standalone', //added for docker
   reactStrictMode: true,
 
   // Fix: allow network access from other devices on your LAN during dev

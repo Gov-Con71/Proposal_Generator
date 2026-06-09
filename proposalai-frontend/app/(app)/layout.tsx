@@ -46,7 +46,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         <nav className="flex items-center gap-0.5 ml-4">
           {[
             { href: '/dashboard',   label: 'Dashboard' },
-            { href: '/proposals/new/page', label: 'Workspace' },
+            { href: '/proposals/workspace', label: 'Workspace' },
             { href: '/proposals',   label: 'Compliance' },
           ].map((link) => (
             <Link
