@@ -30,8 +30,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 # Load .env from the repository root (two levels above this file), wherever the script is invoked from
-
-
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 # ---------------------------------------------------------------------------
 # Logging — writes to both stdout and a timestamped log file
 # ---------------------------------------------------------------------------
@@ -172,7 +171,8 @@ def generate_sample_pdf() -> bytes:
             pdf.multi_cell(0, 7, body)
             pdf.ln(2)
 
-    return bytes(pdf.output())
+    pdf_data = pdf.output(dest="S")
+    return pdf_data if isinstance(pdf_data, (bytes, bytearray)) else pdf_data.encode("latin1")
 
 
 # ---------------------------------------------------------------------------
