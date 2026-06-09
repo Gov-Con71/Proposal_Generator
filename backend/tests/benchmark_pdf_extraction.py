@@ -30,8 +30,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 # Load .env from the repository root (two levels above this file), wherever the script is invoked from
-
-
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 # ---------------------------------------------------------------------------
 # Logging — writes to both stdout and a timestamped log file
 # ---------------------------------------------------------------------------
