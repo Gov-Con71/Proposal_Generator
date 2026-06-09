@@ -1,15 +1,25 @@
 FROM python:3.11-slim
 
+# Prevent Python from writing .pyc files to disk
+ENV PYTHONDONTWRITEBYTECODE=1
+# Prevent Python from buffering stdout and stderr (crucial for real-time Docker logs)
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /code
 
-# Install required system tools for compiling database drivers
-RUN apt-get update && apt-get install -y libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+# Install system dependencies needed for psycopg2 compilation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency list and install them
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade -r requirements.txt
+# Copy only requirements first to maximize Docker layer caching
+COPY requirements.txt /code/
+RUN pip install --no-cache-dir -r requirements.txt
 
-# CRITICAL FIX: Copy everything from your current folder (backend/) into the container (/code)
-COPY . .
+# Copy the rest of the application code
+COPY . /code/
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Production-safe default command. 
+# For local development with hot-reloading, override this command in your docker-compose.yml file instead!
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

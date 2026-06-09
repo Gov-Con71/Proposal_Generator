@@ -4,28 +4,34 @@ services:
     container_name: rfp_postgres_db
     restart: always
     environment:
-      POSTGRES_USER: brian_admin
-      POSTGRES_PASSWORD: my_secure_password123
-      POSTGRES_DB: rfp_proposal_db
+      POSTGRES_USER: ${POSTGRES_USER:-brian_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-my_secure_password123}
+      POSTGRES_DB: ${POSTGRES_DB:-rfp_proposal_db}
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data:Z  # Added :Z for Podman SELinux permission handling
+      - postgres_data:/var/lib/postgresql/data:Z
       - ./backend/init_scripts:/docker-entrypoint-initdb.d:Z
     networks:
       - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-brian_admin} -d $${POSTGRES_DB:-rfp_proposal_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile.backend
     container_name: fastapi_backend_app
+    restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/code:Z  # Added :Z for Podman volume mounting security layers
+      - ./backend:/code:Z
     environment:
-      - DATABASE_URL=postgresql://brian_admin:my_secure_password123@db:5432/rfp_proposal_db
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-brian_admin}:${POSTGRES_PASSWORD:-my_secure_password123}@db:5432/${POSTGRES_DB:-rfp_proposal_db}
     depends_on:
       - db
     networks:
