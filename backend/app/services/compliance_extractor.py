@@ -49,7 +49,9 @@ def _extract_compliance_node(state: ExtractionState) -> ExtractionState:
     """Single graph node: calls Gemini with structured output to populate ComplianceMatrix."""
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    api_key = os.environ["GEMINI_API_KEY"]
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set; cannot run compliance extraction.")
     llm = ChatGoogleGenerativeAI(model=_MODEL, google_api_key=api_key)
     structured_llm = llm.with_structured_output(ComplianceMatrix)
 
