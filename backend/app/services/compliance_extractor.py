@@ -100,4 +100,7 @@ async def run_extraction(markdown_text: str) -> ComplianceMatrix:
     final_state: ExtractionState = await asyncio.to_thread(
         _extraction_graph.invoke, initial_state
     )
-    return final_state["requirements"]
+    requirements = final_state.get("requirements")
+    if requirements is None:
+        raise RuntimeError("Compliance extraction completed without producing requirements.")
+    return requirements
