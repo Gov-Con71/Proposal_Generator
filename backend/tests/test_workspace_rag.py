@@ -1,0 +1,142 @@
+"""Sprint 3.6 — workspace CRUD + RAG integration test.
+
+Real Postgres + pgvector; only the external embedding/LLM calls are stubbed.
+Requires the init schema + rag_schema applied and a pgvector-enabled database.
+"""
+
+import uuid
+
+import psycopg2
+import pytest
+
+from app.core.config import settings
+from app.core.security import create_access_token
+
+
+def _conn():
+    return psycopg2.connect(settings.database_url)
+
+
+@pytest.fixture
+def proposal_with_requirements():
+    """Seeds a user + rfp_document + two extracted requirements; cleans up after."""
+    user_id = str(uuid.uuid4())
+    rfp_id = str(uuid.uuid4())
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO users (user_id, email, password_hash, first_name, last_name) "
+        "VALUES (%s, %s, 'h', 'RAG', 'Tester');",
+        (user_id, f"rag_{uuid.uuid4().hex[:6]}@example.com"),
+    )
+    cur.execute(
+        "INSERT INTO rfp_documents (rfp_id, uploaded_by, file_name, s3_storage_key, processing_status) "
+        "VALUES (%s, %s, 'rfp.pdf', 'k', 'completed');",
+        (rfp_id, user_id),
+    )
+    cur.executemany(
+        "INSERT INTO extracted_requirements (rfp_id, section_number, raw_text_content, category) "
+        "VALUES (%s, %s, %s, %s);",
+        [
+            (rfp_id, "C.3.1", "The contractor SHALL overhaul the pump.", "Technical"),
+            (rfp_id, "H.2", "MFA is REQUIRED for privileged access.", "Security"),
+        ],
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    yield {"user_id": user_id, "rfp_id": rfp_id}
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM users WHERE user_id = %s;", (user_id,))  # cascades
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def _auth(user_id: str) -> dict:
+    token, _ = create_access_token(user_id)
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_requirements_read_and_patch(test_client, proposal_with_requirements):
+    rfp_id = proposal_with_requirements["rfp_id"]
+    auth = _auth(proposal_with_requirements["user_id"])
+
+    # unauthenticated -> 401
+    assert test_client.get(f"/proposals/{rfp_id}/requirements").status_code == 401
+
+    r = test_client.get(f"/proposals/{rfp_id}/requirements", headers=auth)
+    assert r.status_code == 200
+    reqs = r.json()
+    assert len(reqs) == 2
+    assert reqs[0]["category"] in {"technical", "security"}
+
+    # PATCH compliance status persists
+    rid = reqs[0]["id"]
+    patched = test_client.patch(
+        f"/requirements/{rid}", json={"complianceStatus": "addressed"}, headers=auth
+    )
+    assert patched.status_code == 200
+    assert patched.json()["complianceStatus"] == "addressed"
+
+    # cross-tenant read -> 404
+    other = _auth(str(uuid.uuid4()))
+    assert test_client.get(f"/proposals/{rfp_id}/requirements", headers=other).status_code == 404
+
+
+def test_history_ingest_and_retrieval(monkeypatch, test_client, proposal_with_requirements):
+    """Stubs embeddings (deterministic 768-dim) but runs real pgvector search."""
+    from app.services import embeddings, history_service, retrieval
+
+    def fake_embed_texts(texts):
+        return [[0.001 * (i + 1)] * embeddings.EMBED_DIM for i, _ in enumerate(texts)]
+
+    monkeypatch.setattr(history_service, "embed_texts", fake_embed_texts)
+    monkeypatch.setattr(retrieval, "embed_query", lambda t: [0.001] * embeddings.EMBED_DIM)
+
+    user_id = proposal_with_requirements["user_id"]
+    auth = _auth(user_id)
+
+    ingest = test_client.post(
+        "/history",
+        json={"sourceName": "USCG Pump 2024", "content": "We overhauled centrifugal pumps for the USCG. " * 60},
+        headers=auth,
+    )
+    assert ingest.status_code == 201
+    assert ingest.json()["chunks"] >= 1
+
+    sources = test_client.get("/history", headers=auth)
+    assert sources.status_code == 200
+    assert sources.json()[0]["sourceName"] == "USCG Pump 2024"
+
+    hits = retrieval.search_similar(user_id, "pump overhaul experience", top_k=3)
+    assert len(hits) >= 1
+    assert hits[0]["source_name"] == "USCG Pump 2024"
+
+
+def test_generate_section_uses_draft_writer(monkeypatch, test_client, proposal_with_requirements):
+    """Stubs the RAG draft writer; verifies section create + persist."""
+    from app.api.v1 import workspace as wsapi
+
+    monkeypatch.setattr(
+        wsapi.draft_writer,
+        "generate_draft",
+        lambda uid, text, top_k=5: {"content": "Our proven approach…", "citations": []},
+    )
+
+    rfp_id = proposal_with_requirements["rfp_id"]
+    auth = _auth(proposal_with_requirements["user_id"])
+    req_id = test_client.get(f"/proposals/{rfp_id}/requirements", headers=auth).json()[0]["id"]
+
+    gen = test_client.post(
+        f"/proposals/{rfp_id}/sections/generate",
+        json={"requirementId": req_id},
+        headers=auth,
+    )
+    assert gen.status_code == 201
+    assert gen.json()["content"] == "Our proven approach…"
+
+    sections = test_client.get(f"/proposals/{rfp_id}/sections", headers=auth)
+    assert sections.status_code == 200
+    assert len(sections.json()) == 1

@@ -133,12 +133,13 @@ export function useUpload() {
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
 
-  async function upload(file: File, proposalId: string) {
+  async function upload(file: File) {
     setUploading(true)
     setError(null)
     setProgress(0)
     try {
-      const result = await documentsApi.upload(file, proposalId, setProgress)
+      // Tenancy is derived from the auth token attached by the axios client.
+      const result = await documentsApi.upload(file, setProgress)
       return result
     } catch (e: any) {
       setError(e?.response?.data?.detail || 'Upload failed')
@@ -149,4 +150,42 @@ export function useUpload() {
   }
 
   return { upload, uploading, progress, error }
+}
+// ─── use-workspace-mutations.ts (Sprint 3) ────────────────────────────────────
+// requirementsApi / sectionsApi are already imported above.
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import type { Requirement, ProposalSection } from '@/types'
+
+export function useUpdateRequirement(proposalId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: Partial<Requirement> }) =>
+      requirementsApi.update(id, patch),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['requirements', proposalId] }),
+  })
+}
+
+export function useDeleteRequirement(proposalId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => requirementsApi.delete(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['requirements', proposalId] }),
+  })
+}
+
+export function useGenerateSection(proposalId: string) {
+  const qc = useQueryClient()
+  return useMutation<ProposalSection, unknown, string>({
+    mutationFn: (requirementId: string) => sectionsApi.generate(proposalId, requirementId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['sections', proposalId] }),
+  })
+}
+
+export function useSaveSection(proposalId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, content }: { id: string; content: string }) =>
+      sectionsApi.update(id, content),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['sections', proposalId] }),
+  })
 }

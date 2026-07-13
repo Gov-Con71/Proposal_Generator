@@ -2,9 +2,12 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { authApi } from '@/lib/api'
+import { useAuthStore } from '@/lib/stores/auth-store'
 
 export default function LoginPage() {
   const router = useRouter()
+  const setSession = useAuthStore((s) => s.setSession)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
@@ -13,13 +16,20 @@ export default function LoginPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError('')
-    setLoading(true)
-    await new Promise((r) => setTimeout(r, 800))
-    if (email && password) {
-      document.cookie = 'proposalai-token=mock-token; path=/'
-      router.push('/dashboard')
-    } else {
+    if (!email || !password) {
       setError('Please enter your email and password.')
+      return
+    }
+    setLoading(true)
+    try {
+      const session = await authApi.login(email, password)
+      setSession(session)
+      // Cookie lets the route-guard (proxy.ts) see the session server-side.
+      document.cookie = `proposalai-token=${session.accessToken}; path=/`
+      router.push('/dashboard')
+    } catch (err) {
+      const status = (err as { response?: { status?: number } }).response?.status
+      setError(status === 401 ? 'Incorrect email or password.' : 'Sign in failed. Please try again.')
       setLoading(false)
     }
   }

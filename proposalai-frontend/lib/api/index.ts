@@ -1,5 +1,27 @@
-// ─── proposals.ts ────────────────────────────────────────────────────────────
+// ─── auth.ts ─────────────────────────────────────────────────────────────────
 import apiClient from './client'
+import type { Session, User } from '@/types'
+
+export interface RegisterPayload {
+  email: string
+  password: string
+  firstName: string
+  lastName: string
+}
+
+export const authApi = {
+  login: (email: string, password: string) =>
+    apiClient.post<Session>('/auth/login', { email, password }).then((r) => r.data),
+
+  register: (data: RegisterPayload) =>
+    apiClient.post<Session>('/auth/register', data).then((r) => r.data),
+
+  me: () => apiClient.get<User>('/auth/me').then((r) => r.data),
+
+  logout: () => apiClient.post('/auth/logout').then((r) => r.data),
+}
+
+// ─── proposals.ts ────────────────────────────────────────────────────────────
 import type { Proposal, ProposalSummary } from '@/types'
 
 export const proposalsApi = {
@@ -20,12 +42,28 @@ export const proposalsApi = {
 }
 
 // ─── documents.ts ─────────────────────────────────────────────────────────────
+export interface UploadResult {
+  rfpId: string
+  fileName: string
+  sizeBytes: number
+  s3Key: string
+  processingStatus: string
+}
+
+export interface DocumentStatus {
+  rfpId: string
+  fileName: string
+  processingStatus: string
+  requirementsCount: number
+}
+
 export const documentsApi = {
-  upload: (file: File, proposalId: string, onProgress?: (pct: number) => void) => {
+  // Streams the file to POST /documents/upload. The tenant is derived from the
+  // JWT the axios client attaches — no user id in the body.
+  upload: (file: File, onProgress?: (pct: number) => void) => {
     const form = new FormData()
     form.append('file', file)
-    form.append('proposal_id', proposalId)
-    return apiClient.post('/documents/upload', form, {
+    return apiClient.post<UploadResult>('/documents/upload', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: (e) => {
         if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100))
@@ -33,8 +71,12 @@ export const documentsApi = {
     }).then((r) => r.data)
   },
 
+  // Poll ingestion status (pending → parsing → extracting → completed/failed).
+  status: (rfpId: string) =>
+    apiClient.get<DocumentStatus>(`/documents/${rfpId}`).then((r) => r.data),
+
   reanalyze: (documentId: string) =>
-    apiClient.post(`/documents/${documentId}/reanalyze`).then((r) => r.data),
+    apiClient.post<DocumentStatus>(`/documents/${documentId}/reanalyze`).then((r) => r.data),
 }
 
 // ─── requirements.ts ──────────────────────────────────────────────────────────
@@ -46,6 +88,9 @@ export const requirementsApi = {
 
   update: (id: string, data: Partial<Requirement>) =>
     apiClient.patch<Requirement>(`/requirements/${id}`, data).then((r) => r.data),
+
+  delete: (id: string) =>
+    apiClient.delete(`/requirements/${id}`).then((r) => r.data),
 }
 
 // ─── sections.ts ──────────────────────────────────────────────────────────────
@@ -66,6 +111,28 @@ export const sectionsApi = {
 
   regenerate: (id: string) =>
     apiClient.post<ProposalSection>(`/sections/${id}/regenerate`).then((r) => r.data),
+
+  // Create a section for a requirement and fill it with a RAG-generated draft.
+  generate: (proposalId: string, requirementId: string) =>
+    apiClient
+      .post<ProposalSection>(`/proposals/${proposalId}/sections/generate`, { requirementId })
+      .then((r) => r.data),
+}
+
+// ─── history.ts (RAG past-performance) ────────────────────────────────────────
+export interface HistorySource {
+  sourceName: string
+  chunks: number
+  createdAt: string
+}
+
+export const historyApi = {
+  list: () => apiClient.get<HistorySource[]>('/history').then((r) => r.data),
+
+  ingest: (sourceName: string, content: string) =>
+    apiClient
+      .post<{ sourceName: string; chunks: number }>('/history', { sourceName, content })
+      .then((r) => r.data),
 }
 
 // ─── compliance.ts ────────────────────────────────────────────────────────────
