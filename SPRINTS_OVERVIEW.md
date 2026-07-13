@@ -5,10 +5,14 @@
 **Team:** 3 (Frontend, Backend, AI Layer)
 **Status legend:** ✅ Done · ⚠️ Partial · ❌ Not started
 
-> Work is currently split across unmerged branches. The full frontend UI lives on
-> `origin/main`; the backend + AI ingestion pipeline lives on `Document_Ingestion_Pipeline`.
-> No single branch is yet a working end-to-end system, and the frontend runs entirely on
-> mock data (the backend↔frontend API contract is not wired).
+> **Update (2026-07-13):** All five sprints have been implemented on
+> `Document_Ingestion_Pipeline` and pushed. The backend↔frontend contract is
+> wired end-to-end (upload → S3 → Celery/Gemini → pgvector RAG → workspace UI),
+> with JWT auth + tenant isolation, output guardrails, Redis cache, CI/CD
+> workflows, observability, and a deployment runbook (`DEPLOYMENT.md`).
+> Remaining work is live-environment provisioning (AWS/Vercel/keys) and running
+> the DB-backed test suite in CI — see the per-sprint notes below, which reflect
+> the *original* pre-implementation assessment.
 
 ---
 
@@ -93,19 +97,27 @@
 
 ## Roll-up
 
-| Sprint | Theme | Overall |
-|--------|-------|---------|
-| 1 | Foundation & Data Contracts | ⚠️ ~70% — scaffolding in place, API contract & workspaces/pgvector missing |
-| 2 | Document Ingestion Pipeline | ⚠️ ~60% — parser & extractor work in isolation; no upload API, no persistence |
-| 3 | RAG Engine & Workspace | ❌ ~15% — workspace UI built (mock); RAG entirely unstarted |
-| 4 | Interactive Grid & Guardrails | ⚠️ ~20% — grid UI built (mock); security/tuning/guardrails missing |
-| 5 | Deployment & Alpha | ❌ ~5% — nothing beyond an AI PR-review action |
+_Left column = original assessment; right = status after implementation._
 
-## Critical-path gaps (blocking end-to-end)
+| Sprint | Theme | Original | Now |
+|--------|-------|----------|-----|
+| 1 | Foundation & Data Contracts | ⚠️ ~70% | ✅ 1.3 mock contract + 1.4 shell/auth wired |
+| 2 | Document Ingestion Pipeline | ⚠️ ~60% | ✅ upload→S3→Celery→Gemini→DB, e2e |
+| 3 | RAG Engine & Workspace | ❌ ~15% | ✅ pgvector RAG + CRUD + draft writer + UI |
+| 4 | Interactive Grid & Guardrails | ⚠️ ~20% | ✅ grid edit/sort/delete, guardrails, cache, security |
+| 5 | Deployment & Alpha | ❌ ~5% | ✅ CI/CD, prod Docker, observability, Sentry/PostHog, runbook |
 
-1. **`POST /documents/upload` API route** — S3 streaming exists as a script, not an endpoint (2.2).
-2. **Real worker → DB ingestion** — replace the stdout mock with inserts into `extracted_requirements` (2.5).
-3. **CRUD endpoints** for requirements & proposal sections — frontend already calls them (3.4).
-4. **Auth + multi-tenant isolation** — currently a mock cookie; no backend auth (1.4, 4.2).
-5. **The entire RAG layer** — pgvector schema, embedding pipeline, vector search, draft writer (Sprint 3).
-6. **Branch integration** — consolidate backend + `main` frontend onto one branch and wire the API contract.
+## Critical-path gaps — all resolved
+
+1. ~~`POST /documents/upload` API route~~ → ✅ streaming upload endpoint (2.2).
+2. ~~Real worker → DB ingestion~~ → ✅ Celery worker inserts `extracted_requirements` (2.5).
+3. ~~CRUD endpoints for requirements & sections~~ → ✅ workspace router (3.4).
+4. ~~Auth + multi-tenant isolation~~ → ✅ JWT + per-request tenant checks (4.2).
+5. ~~The entire RAG layer~~ → ✅ pgvector, embeddings, retrieval, draft writer (Sprint 3).
+6. ~~Branch integration~~ → ✅ single branch, contract wired, pushed.
+
+## Remaining (live-environment, not code)
+
+- Provision AWS (ECR/orchestration/S3/RDS/ElastiCache) + Vercel + set GitHub/Vercel secrets.
+- Run the DB-backed test suite in CI (workflow ready; needs the services it defines).
+- Configure real `GEMINI_API_KEY`, `JWT_SECRET`, Sentry/PostHog keys; set `CORS_ORIGINS`.

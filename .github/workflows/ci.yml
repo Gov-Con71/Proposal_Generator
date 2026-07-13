@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main, Document_Ingestion_Pipeline]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  backend:
+    name: Backend — tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: ankane/pgvector:latest
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: rfp_proposal_db
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/rfp_proposal_db
+      CACHE_URL: redis://localhost:6379/2
+      CELERY_TASK_ALWAYS_EAGER: "true"
+      TELEMETRY_ENABLED: "false"
+      GEMINI_API_KEY: dummy-key-tests-stub-the-llm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Apply database schema (init order)
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          psql "$DATABASE_URL" -f backend/init_scripts/init_schema.sql
+          psql "$DATABASE_URL" -f backend/init_scripts/rag_schema.sql
+          psql "$DATABASE_URL" -f backend/init_scripts/tuning.sql
+
+      - name: Run tests
+        working-directory: backend
+        env:
+          PYTHONPATH: .
+        run: pytest -q
+
+  frontend:
+    name: Frontend — typecheck + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: proposalai-frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: proposalai-frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build

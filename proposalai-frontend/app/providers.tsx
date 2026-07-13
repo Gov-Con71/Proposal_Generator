@@ -1,8 +1,14 @@
 'use client'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { initObservability } from '@/lib/observability'
 
 export function Providers({ children }: { children: React.ReactNode }) {
+  // Initialise analytics/error reporting once on the client (no-op without keys).
+  useEffect(() => {
+    initObservability()
+  }, [])
+
   // One client per browser session; keep server data reasonably fresh.
   const [client] = useState(
     () =>

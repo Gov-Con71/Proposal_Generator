@@ -53,4 +53,18 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = Field(default=60, validation_alias="CACHE_TTL_SECONDS")
     cache_enabled: bool = Field(default=True, validation_alias="CACHE_ENABLED")
 
+    # --- Observability (Sprint 5) ---
+    telemetry_enabled: bool = Field(default=True, validation_alias="TELEMETRY_ENABLED")
+    sentry_dsn: str = Field(default="", validation_alias="SENTRY_DSN")
+    environment: str = Field(default="development", validation_alias="ENVIRONMENT")
+
+    # Comma-separated allowed CORS origins (set to the Vercel domain in prod).
+    cors_origins: str = Field(
+        default="http://localhost:3000", validation_alias="CORS_ORIGINS"
+    )
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
 settings = Settings()

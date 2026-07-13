@@ -53,6 +53,8 @@ def _extract_compliance_node(state: ExtractionState) -> ExtractionState:
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set; cannot run compliance extraction.")
 
+    from app.core import telemetry
+
     client = genai.Client(api_key=api_key)
 
     logger.info(
@@ -60,15 +62,21 @@ def _extract_compliance_node(state: ExtractionState) -> ExtractionState:
         len(state["markdown_text"]),
         _MODEL,
     )
-    response = client.models.generate_content(
-        model=_MODEL,
-        contents=f"DOCUMENT:\n{state['markdown_text']}",
-        config=types.GenerateContentConfig(
-            system_instruction=_SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            response_schema=ComplianceMatrix,
-        ),
-    )
+    _start = telemetry.now()
+    try:
+        response = client.models.generate_content(
+            model=_MODEL,
+            contents=f"DOCUMENT:\n{state['markdown_text']}",
+            config=types.GenerateContentConfig(
+                system_instruction=_SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                response_schema=ComplianceMatrix,
+            ),
+        )
+    except Exception:
+        telemetry.record_error(_MODEL, _start)
+        raise
+    telemetry.record_response(_MODEL, response, _start)
 
     # google-genai parses the JSON straight into the Pydantic schema.
     result: ComplianceMatrix = response.parsed

@@ -5,8 +5,19 @@ from app.api.v1 import documents
 from app.api.v1 import auth
 from app.api.v1 import history
 from app.api.v1 import workspace
+from app.api.v1 import monitoring
 from app.api.mock import proposals as mock_proposals
 from app.core.config import settings
+
+# --- Error reporting (Story 5.4) — no-op unless SENTRY_DSN is configured ---
+if settings.sentry_dsn:
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        environment=settings.environment,
+        traces_sample_rate=0.1,
+    )
 
 DESCRIPTION = """
 Interactive API contract for the AI Proposal Platform.
@@ -37,11 +48,14 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Operational endpoints (health/ready/metrics) ---
+app.include_router(monitoring.router)
 
 # --- Real auth (JWT) ---
 app.include_router(auth.router)

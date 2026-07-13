@@ -2,6 +2,7 @@
 import { useEffect } from 'react'
 import { AlertTriangle, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { captureException } from '@/lib/observability'
 
 // Global error boundary for the authenticated app segment (Story 4.5).
 export default function AppError({
@@ -12,8 +13,8 @@ export default function AppError({
   reset: () => void
 }) {
   useEffect(() => {
-    // Surface for observability wiring (Sentry lands in Sprint 5.4).
     console.error('App segment error:', error)
+    captureException(error) // reported to Sentry when configured (Story 5.4)
   }, [error])
 
   return (

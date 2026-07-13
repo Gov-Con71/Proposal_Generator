@@ -26,7 +26,15 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     """Embeds a batch of texts, returning one 768-dim vector per input."""
     if not texts:
         return []
-    result = _client().models.embed_content(model=_EMBED_MODEL, contents=texts)
+    from app.core import telemetry
+
+    start = telemetry.now()
+    try:
+        result = _client().models.embed_content(model=_EMBED_MODEL, contents=texts)
+    except Exception:
+        telemetry.record_error(_EMBED_MODEL, start)
+        raise
+    telemetry.record_response(_EMBED_MODEL, result, start)
     logger.info("embed_texts: embedded %d chunk(s) with %s", len(texts), _EMBED_MODEL)
     return [list(e.values) for e in result.embeddings]
 

@@ -51,12 +51,20 @@ def generate_draft(uploaded_by: UUID, requirement_text: str, top_k: int = 5) -> 
     context = search_similar(uploaded_by, requirement_text, top_k=top_k)
     prompt = _assemble_prompt(requirement_text, context)
 
+    from app.core import telemetry
+
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(system_instruction=_SYSTEM_PROMPT),
-    )
+    _start = telemetry.now()
+    try:
+        response = client.models.generate_content(
+            model=_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(system_instruction=_SYSTEM_PROMPT),
+        )
+    except Exception:
+        telemetry.record_error(_MODEL, _start)
+        raise
+    telemetry.record_response(_MODEL, response, _start)
     # Guardrail: reject empty/degenerate generations before they reach the DB.
     draft = validate_draft(response.text or "")
     logger.info(
