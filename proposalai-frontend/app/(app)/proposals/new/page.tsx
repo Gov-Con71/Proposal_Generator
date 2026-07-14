@@ -1,8 +1,8 @@
 'use client'
 import { useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
-import { useDropzone } from 'react-dropzone'
-import { CloudUpload, FileText, CheckCircle2, Trash2, ArrowLeft } from 'lucide-react'
+import { useDropzone, type FileRejection } from 'react-dropzone'
+import { CloudUpload, FileText, CheckCircle2, Trash2, ArrowLeft, AlertTriangle, Loader2 } from 'lucide-react'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -10,7 +10,10 @@ import { Input } from '@/components/ui/input'
 import { Card, StepIndicator } from '@/components/ui/card'
 import { cn } from '@/lib/utils/cn'
 import { formatFileSize } from '@/lib/utils/format'
+import { documentsApi } from '@/lib/api'
 import type { Step } from '@/components/ui/card'
+
+const MAX_SIZE = 50 * 1024 * 1024
 
 const STEPS: Step[] = [
   { label: 'Upload RFP', status: 'active' },
@@ -29,6 +32,9 @@ const CONTRACT_TYPES = [
 export default function UploadPage() {
   const router = useRouter()
   const [file, setFile] = useState<File | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [error, setError] = useState<string | null>(null)
   const [form, setForm] = useState({
     title: 'Enterprise Cloud Migration & Support Services',
     agency: 'Department of Defense (DoD)',
@@ -39,18 +45,60 @@ export default function UploadPage() {
   })
 
   const onDrop = useCallback((accepted: File[]) => {
-    if (accepted[0]) setFile(accepted[0])
+    if (accepted[0]) {
+      setFile(accepted[0])
+      setError(null)
+    }
+  }, [])
+
+  // Client-side error boundary (Story 2.1): surface too-large / wrong-type before hitting the API.
+  const onDropRejected = useCallback((rejections: FileRejection[]) => {
+    const code = rejections[0]?.errors[0]?.code
+    setError(
+      code === 'file-too-large' ? 'File exceeds the 50MB limit.'
+      : code === 'file-invalid-type' ? 'Unsupported file type — use PDF, DOCX, or TXT.'
+      : rejections[0]?.errors[0]?.message ?? 'File rejected.'
+    )
   }, [])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
+    onDropRejected,
     accept: { 'application/pdf': ['.pdf'], 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'], 'text/plain': ['.txt'] },
     maxFiles: 1,
-    maxSize: 50 * 1024 * 1024,
+    maxSize: MAX_SIZE,
   })
 
   function update(key: string, value: string) {
     setForm((f) => ({ ...f, [key]: value }))
+  }
+
+  // Streams the file to the backend, then advances to the processing view.
+  async function handleContinue() {
+    if (!file) {
+      // No real file selected (demo state) — proceed without an upload.
+      router.push('/proposals/new/analyze')
+      return
+    }
+    setError(null)
+    setUploading(true)
+    setProgress(0)
+    try {
+      const res = await documentsApi.upload(file, setProgress)
+      router.push(`/proposals/new/process?rfp=${res.rfpId}`)
+    } catch (e) {
+      const err = e as { response?: { status?: number; data?: { detail?: string } } }
+      const detail = err.response?.data?.detail
+      const status = err.response?.status
+      setError(
+        status === 401 ? 'Your session expired — please sign in again.'
+        : detail
+        ?? (status === 413 ? 'File exceeds the 50MB limit.'
+          : status === 415 ? 'Unsupported file type — use PDF, DOCX, or TXT.'
+          : 'Upload failed. Please try again.')
+      )
+      setUploading(false)
+    }
   }
 
   return (
@@ -111,6 +159,26 @@ export default function UploadPage() {
             </button>
           </div>
         )}
+        {/* Upload progress */}
+        {uploading && (
+          <div className="mt-3">
+            <div className="flex justify-between text-xs text-[var(--text-secondary)] mb-1.5">
+              <span className="flex items-center gap-1.5"><Loader2 className="w-3 h-3 animate-spin" /> Uploading…</span>
+              <span className="font-medium text-primary-600">{progress}%</span>
+            </div>
+            <div className="h-1.5 bg-[var(--bg-secondary)] rounded-full overflow-hidden">
+              <div className="h-full bg-primary-600 rounded-full transition-all duration-300" style={{ width: `${progress}%` }} />
+            </div>
+          </div>
+        )}
+
+        {/* Error boundary */}
+        {error && (
+          <div className="flex items-center gap-2 mt-3 px-3 py-2.5 bg-danger-50 border border-danger-200 rounded-lg">
+            <AlertTriangle className="w-4 h-4 text-danger-600 shrink-0" />
+            <p className="text-xs text-danger-700">{error}</p>
+          </div>
+        )}
       </Card>
 
       {/* Auto-detected solicitation details */}
@@ -162,8 +230,14 @@ export default function UploadPage() {
         <Button variant="default" asChild>
           <Link href="/dashboard">Cancel</Link>
         </Button>
-        <Button variant="primary" icon={<ArrowLeft className="w-3.5 h-3.5 rotate-180" />} iconPosition="right" onClick={() => router.push('/proposals/new/analyze')}>
-          Continue to Analysis
+        <Button
+          variant="primary"
+          icon={uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowLeft className="w-3.5 h-3.5 rotate-180" />}
+          iconPosition="right"
+          disabled={uploading}
+          onClick={handleContinue}
+        >
+          {uploading ? 'Uploading…' : 'Continue to Analysis'}
         </Button>
       </div>
     </div>

@@ -1,6 +1,6 @@
 'use client'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import {
   ShieldCheck, LayoutDashboard, PenLine, Table2,
   History, Building2, Users, LogOut, HelpCircle,
@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { Button } from '@/components/ui/button'
+import { useAuthStore } from '@/lib/stores/auth-store'
 
 const NAV = [
   {
@@ -30,6 +31,15 @@ const NAV = [
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
+  const router = useRouter()
+  const clearSession = useAuthStore((s) => s.clearSession)
+
+  function handleLogout() {
+    clearSession()
+    // Expire the route-guard cookie set at login.
+    document.cookie = 'proposalai-token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'
+    router.push('/login')
+  }
 
   return (
     <div className="min-h-screen bg-[var(--bg-secondary)]">
@@ -112,9 +122,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             <Link href="#" className="flex items-center gap-2.5 mx-2 px-2 py-1.5 rounded text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)] transition-colors">
               <HelpCircle className="w-3.5 h-3.5" /> Help
             </Link>
-            <Link href="/login" className="flex items-center gap-2.5 mx-2 px-2 py-1.5 rounded text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)] transition-colors">
+            <button onClick={handleLogout} className="w-full flex items-center gap-2.5 mx-2 px-2 py-1.5 rounded text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)] transition-colors">
               <LogOut className="w-3.5 h-3.5" /> Logout
-            </Link>
+            </button>
           </div>
         </div>
       </aside>

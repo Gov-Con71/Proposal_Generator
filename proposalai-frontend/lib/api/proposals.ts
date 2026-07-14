@@ -1,5 +1,5 @@
-import { apiFetch } from './client'
+import apiClient from './client'
 
 export async function fetchProposals(){
-  return apiFetch('/proposals')
+  return apiClient.get('/proposals').then((r) => r.data)
 }
