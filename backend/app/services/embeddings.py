@@ -1,42 +1,27 @@
-"""Text embeddings via the google-genai SDK (Story 3.1).
+"""Text embeddings (Story 3.1).
 
-Uses text-embedding-004 (768-dim) — the same SDK family as the compliance
-extractor and draft writer. Import-safe: the SDK is only imported on first use.
+Thin, stable facade over the configured LLM provider (`app.services.llm`).
+Retrieval, history ingestion, and tests depend on these names; the actual AI
+platform is chosen behind `get_llm()`, so swapping providers touches only the
+adapter — not this module.
 """
 
 import logging
-import os
+
+from app.services.llm import get_llm
 
 logger = logging.getLogger(__name__)
 
-_EMBED_MODEL = "text-embedding-004"
+# Kept for callers/schema reference; the active provider must match this width
+# (historical_chunks.embedding is vector(768)).
 EMBED_DIM = 768
-
-
-def _client():
-    from google import genai
-
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set; cannot embed text.")
-    return genai.Client(api_key=api_key)
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
     """Embeds a batch of texts, returning one 768-dim vector per input."""
     if not texts:
         return []
-    from app.core import telemetry
-
-    start = telemetry.now()
-    try:
-        result = _client().models.embed_content(model=_EMBED_MODEL, contents=texts)
-    except Exception:
-        telemetry.record_error(_EMBED_MODEL, start)
-        raise
-    telemetry.record_response(_EMBED_MODEL, result, start)
-    logger.info("embed_texts: embedded %d chunk(s) with %s", len(texts), _EMBED_MODEL)
-    return [list(e.values) for e in result.embeddings]
+    return get_llm().embed(texts)
 
 
 def embed_query(text: str) -> list[float]:

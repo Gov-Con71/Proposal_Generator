@@ -8,12 +8,20 @@ draft writer.
 import logging
 from uuid import UUID
 
-from pgvector.psycopg2 import register_vector
-
 from app.core.db import get_connection
 from app.services.embeddings import embed_query
 
 logger = logging.getLogger(__name__)
+
+
+def _vector_literal(vec: list[float]) -> str:
+    """Formats an embedding as pgvector's text literal (e.g. '[0.1,0.2]').
+
+    The `<=>` operator has no `vector <=> numeric[]` form, so a bare Python list
+    (sent as numeric[]) fails to match. Passing the canonical literal with an
+    explicit `::vector` cast works regardless of array-cast availability.
+    """
+    return "[" + ",".join(map(str, vec)) + "]"
 
 
 def search_similar(uploaded_by: UUID, query: str, top_k: int = 5) -> list[dict]:
@@ -23,20 +31,19 @@ def search_similar(uploaded_by: UUID, query: str, top_k: int = 5) -> list[dict]:
     """
     if not query.strip():
         return []
-    query_vec = embed_query(query)
+    query_vec = _vector_literal(embed_query(query))
 
     conn = get_connection()
     try:
-        register_vector(conn)
         with conn.cursor() as cur:
             # <=> is cosine distance (0 = identical); similarity = 1 - distance.
             cur.execute(
                 """
                 SELECT chunk_id, source_name, content,
-                       1 - (embedding <=> %s) AS score
+                       1 - (embedding <=> %s::vector) AS score
                 FROM historical_chunks
                 WHERE uploaded_by = %s AND embedding IS NOT NULL
-                ORDER BY embedding <=> %s
+                ORDER BY embedding <=> %s::vector
                 LIMIT %s;
                 """,
                 (query_vec, str(uploaded_by), query_vec, top_k),
