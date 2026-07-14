@@ -1,15 +1,48 @@
-FROM python:3.11-slim
+# Development image: installs deps into a venv, runs uvicorn with --reload.
+# The compose stack bind-mounts ./backend over /code so edits hot-reload; the
+# COPY here just lets the image run standalone too.
+#
+# Multi-stage so the build toolchain (gcc/libpq-dev) never ships in the final
+# image — only the compiled/wheeled packages in the venv do.
 
-WORKDIR /code
+# --- build stage: install dependencies into an isolated venv ---
+FROM python:3.11-slim AS builder
 
-# Install required system tools for compiling database drivers
-RUN apt-get update && apt-get install -y libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Copy dependency list and install them
+# gcc/libpq-dev cover any dependency without a prebuilt wheel; discarded below.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
-# CRITICAL FIX: Copy everything from your current folder (backend/) into the container (/code)
-COPY . .
+# --- runtime stage: slim, no toolchain, non-root ---
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+# libgomp1 is the one runtime shared lib the native wheels need (onnxruntime,
+# pulled in by markitdown[all] for content sniffing).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+
+RUN useradd --create-home --uid 1001 appuser
+WORKDIR /code
+COPY --chown=appuser:appuser . .
+USER appuser
+
+EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

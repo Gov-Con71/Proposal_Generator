@@ -1,19 +1,44 @@
 # Production image (Story 5.2). Built + pushed to ECR by the deploy workflow.
-# Runs gunicorn with uvicorn workers — no --reload, multiple workers.
-FROM python:3.11-slim
+# Runs gunicorn with uvicorn workers (no --reload) as a non-root user.
+#
+# Multi-stage so the build toolchain (gcc/libpq-dev) never ships in the final
+# image — only the compiled/wheeled packages in the venv do.
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+# --- build stage: install dependencies into an isolated venv ---
+FROM python:3.11-slim AS builder
 
-WORKDIR /code
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends libpq-dev gcc \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade -r requirements.txt
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-COPY . .
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+# --- runtime stage: slim, no toolchain, non-root ---
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+# libgomp1: runtime shared lib for native wheels (onnxruntime via markitdown[all]).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+
+RUN useradd --create-home --uid 1001 appuser
+WORKDIR /code
+COPY --chown=appuser:appuser . .
+USER appuser
 
 EXPOSE 8000
 
