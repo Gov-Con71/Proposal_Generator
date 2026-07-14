@@ -1,0 +1,63 @@
+# Databases-only stack: Postgres (pgvector), Redis, and LocalStack (S3).
+# Use this to run the data services in containers while developing the
+# backend/frontend on the host:
+#
+#   docker compose -f docker-compose.db.yml up -d
+#
+# All credentials/ports come from the root .env (copy .env.example first).
+# The full app stack lives in docker-compose.yml.
+
+services:
+  db:
+    image: ankane/pgvector:latest
+    container_name: rfp_postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data:Z  # :Z for Podman SELinux handling
+      - ./backend/init_scripts:/docker-entrypoint-initdb.d:Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: rfp_redis
+    restart: always
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  localstack:
+    image: localstack/localstack:3
+    container_name: rfp_localstack
+    restart: always
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+    ports:
+      - "${LOCALSTACK_PORT:-4566}:4566"
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+
+networks:
+  app-network:
+    driver: bridge

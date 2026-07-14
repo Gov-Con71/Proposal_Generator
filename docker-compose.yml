@@ -1,17 +1,31 @@
+# Full application stack: databases + FastAPI backend + Celery worker.
+# Credentials/config come from the root .env (copy .env.example first):
+#
+#   cp .env.example .env   # then set GEMINI_API_KEY
+#   docker compose up --build
+#
+# Note: service-to-service URLs use the compose network hostnames
+# (db / redis / localstack), NOT the localhost values in .env.
+
 services:
   db:
     image: ankane/pgvector:latest
     container_name: rfp_postgres_db
     restart: always
     environment:
-      POSTGRES_USER: brian_admin
-      POSTGRES_PASSWORD: my_secure_password123
-      POSTGRES_DB: rfp_proposal_db
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data:Z  # Added :Z for Podman SELinux permission handling
+      - postgres_data:/var/lib/postgresql/data:Z  # :Z for Podman SELinux handling
       - ./backend/init_scripts:/docker-entrypoint-initdb.d:Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - app-network
 
@@ -20,7 +34,12 @@ services:
     container_name: rfp_redis
     restart: always
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - app-network
 
@@ -30,9 +49,9 @@ services:
     restart: always
     environment:
       - SERVICES=s3
-      - DEFAULT_REGION=us-east-1
+      - DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
     ports:
-      - "4566:4566"
+      - "${LOCALSTACK_PORT:-4566}:4566"
     networks:
       - app-network
 
@@ -44,21 +63,31 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/code:Z  # Added :Z for Podman volume mounting security layers
+      - ./backend:/code:Z  # :Z for Podman volume mounting security layers
     environment:
-      - DATABASE_URL=postgresql://brian_admin:my_secure_password123@db:5432/rfp_proposal_db
+      # Internal URLs use compose hostnames, credentials from .env.
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - USE_LOCALSTACK=true
       - LOCALSTACK_ENDPOINT=http://localstack:4566
-      - S3_BUCKET_NAME=proposal-artifacts-local
-      - AWS_DEFAULT_REGION=us-east-1
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-proposal-artifacts-local}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - CACHE_URL=redis://redis:6379/2
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
       # Override in production — the app default is intentionally insecure.
       - JWT_SECRET=${JWT_SECRET:-dev-insecure-change-me}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - SENTRY_DSN=${SENTRY_DSN:-}
     depends_on:
-      - db
-      - redis
-      - localstack
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_started
     networks:
       - app-network
 
@@ -72,19 +101,22 @@ services:
     volumes:
       - ./backend:/code:Z
     environment:
-      - DATABASE_URL=postgresql://brian_admin:my_secure_password123@db:5432/rfp_proposal_db
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - USE_LOCALSTACK=true
       - LOCALSTACK_ENDPOINT=http://localstack:4566
-      - S3_BUCKET_NAME=proposal-artifacts-local
-      - AWS_DEFAULT_REGION=us-east-1
-      # GEMINI_API_KEY must be provided via the shell env or a .env file for extraction.
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-proposal-artifacts-local}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      # GEMINI_API_KEY must be provided via .env for extraction.
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
     depends_on:
-      - db
-      - redis
-      - localstack
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_started
     networks:
       - app-network
 
