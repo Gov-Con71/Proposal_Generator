@@ -26,9 +26,12 @@ your chosen orchestrator (ECS / EKS / EC2) with two commands from the same image
 
 ## 2. Configuration
 
-Copy the templates and fill them in — never commit real secrets:
+Copy the templates and fill them in — never commit real secrets (`.env` is
+gitignored):
 
-- Backend: `backend/.env.example` → `.env`
+- **Root (Docker Compose):** `.env.example` → `.env` — DB credentials/ports plus
+  all backend vars. Compose auto-loads this file for `${VAR}` substitution.
+- Backend (host runs, non-Docker): `backend/.env.example` → `backend/.env`
 - Frontend: `proposalai-frontend/.env.example` → `.env.local`
 
 Generate a strong `JWT_SECRET` (e.g. `openssl rand -hex 32`).
@@ -48,10 +51,28 @@ psql "$DATABASE_URL" -f backend/init_scripts/tuning.sql       # indexes + ANALYZ
 ## 4. Local development
 
 ```bash
-GEMINI_API_KEY=... docker compose up --build
-# db, redis, localstack, backend (:8000), celery-worker
+cp .env.example .env            # then set GEMINI_API_KEY (and a strong JWT_SECRET)
+```
+
+**Full stack** (`docker-compose.yml`) — db, redis, localstack, backend (:8000),
+celery-worker, all reading the root `.env`:
+
+```bash
+docker compose up --build
 cd proposalai-frontend && npm run dev   # :3000
 ```
+
+**Databases only** (`docker-compose.db.yml`) — run just Postgres/Redis/LocalStack
+in containers while developing the backend on the host:
+
+```bash
+docker compose -f docker-compose.db.yml up -d
+cd backend && uvicorn app.main:app --reload   # uses backend/.env
+```
+
+The Postgres named volume persists across runs; the `init_scripts` only run on a
+fresh volume. After changing DB credentials in `.env`, reset with
+`docker compose down -v` before `up`.
 
 ## 5. CI (`.github/workflows/ci.yml`)
 
