@@ -160,3 +160,32 @@ def reanalyze(
         processing_status="pending",
         requirements_count=docs.count_requirements(rfp_id),
     )
+
+
+@router.post(
+    "/{rfp_id}/draft",
+    response_model=DocumentStatusResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Generate a full proposal draft with the AI writer agent (async)",
+)
+def draft_proposal(
+    rfp_id: UUID, uploaded_by: UUID = Depends(get_current_user_id)
+) -> DocumentStatusResponse:
+    """Queues the drafting agent. Poll GET /documents/{rfp_id} for status
+    ('drafting' → 'drafted') and GET /proposals/{rfp_id}/sections for results."""
+    document = _owned_document_or_404(rfp_id, uploaded_by)
+    requirements_count = docs.count_requirements(rfp_id)
+    if requirements_count == 0:
+        # Drafting is grounded in the extracted compliance matrix.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "No requirements extracted yet — ingest the RFP before drafting.",
+        )
+    docs.update_status(rfp_id, "drafting")
+    celery_app.send_task("draft_proposal", args=[str(rfp_id)])
+    return DocumentStatusResponse(
+        rfp_id=str(rfp_id),
+        file_name=document["file_name"],
+        processing_status="drafting",
+        requirements_count=requirements_count,
+    )

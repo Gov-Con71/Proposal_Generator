@@ -1,20 +1,20 @@
 """Context-aware draft writer (Story 3.5).
 
 Compiles a requirement plus the tenant's most relevant past-performance context
-into drafted proposal prose using google-genai. This is the RAG generation step:
-retrieve (3.2) → assemble prompt → generate.
+into drafted proposal prose. This is the RAG generation step: retrieve (3.2) →
+assemble prompt → generate. The LLM call goes through the provider-agnostic
+`app.services.llm` port, so the AI platform is swappable.
 """
 
 import logging
-import os
 from uuid import UUID
 
 from app.services.guardrails import validate_draft
+from app.services.llm import get_llm
 from app.services.retrieval import search_similar
 
 logger = logging.getLogger(__name__)
 
-_MODEL = "gemini-2.0-flash"
 _SYSTEM_PROMPT = (
     "You are a senior government-contracts proposal writer. Draft a concise, "
     "compliant, professional response to the requirement below. Ground every "
@@ -39,34 +39,88 @@ def _assemble_prompt(requirement_text: str, context: list[dict]) -> str:
     )
 
 
+_SECTION_SYSTEM_PROMPT = (
+    "You are a senior government-contracts proposal writer. Draft ONE cohesive "
+    "proposal section that satisfies ALL of the numbered requirements below. "
+    "Ground every claim in the provided past-performance context; do not invent "
+    "facts, certifications, or contract numbers. Where the context is thin, write "
+    "a defensible response and flag assumptions briefly. Produce polished prose, "
+    "not a restatement of the requirement list."
+)
+
+
+def _assemble_section_prompt(
+    section_title: str,
+    requirement_texts: list[str],
+    context: list[dict],
+    feedback: str | None = None,
+) -> str:
+    reqs = "\n".join(f"  {i + 1}. {t}" for i, t in enumerate(requirement_texts))
+    if context:
+        blocks = "\n\n".join(
+            f"[{c['source_name']} — relevance {c['score']:.2f}]\n{c['content']}"
+            for c in context
+        )
+    else:
+        blocks = "(no matching past-performance context found)"
+    # On a revision, fold the compliance critic's feedback into the instruction.
+    revision = (
+        f"\n\nA prior draft was reviewed and found lacking. Address this feedback "
+        f"specifically:\n{feedback}\n"
+        if feedback
+        else ""
+    )
+    return (
+        f"PROPOSAL SECTION: {section_title}\n\n"
+        f"REQUIREMENTS THIS SECTION MUST SATISFY:\n{reqs}\n\n"
+        f"PAST-PERFORMANCE CONTEXT:\n{blocks}"
+        f"{revision}\n\n"
+        "Write the section draft now."
+    )
+
+
+def generate_section_draft(
+    uploaded_by: UUID,
+    section_title: str,
+    requirement_texts: list[str],
+    top_k: int = 5,
+    feedback: str | None = None,
+) -> dict:
+    """Drafts a single proposal section grounded in the tenant's context.
+
+    Like `generate_draft`, but writes one cohesive section covering several
+    requirements at once — the unit the drafting agent persists. Pass `feedback`
+    from the compliance critic to steer a revision.
+    """
+    # Retrieve against the section's combined intent (title + its requirements).
+    query = section_title + "\n" + "\n".join(requirement_texts)
+    context = search_similar(uploaded_by, query, top_k=top_k)
+    prompt = _assemble_section_prompt(section_title, requirement_texts, context, feedback)
+
+    text = get_llm().generate_text(prompt, system=_SECTION_SYSTEM_PROMPT)
+    draft = validate_draft(text)
+    logger.info(
+        "generate_section_draft: '%s' — %d chars from %d context block(s)",
+        section_title,
+        len(draft),
+        len(context),
+    )
+    return {
+        "content": draft,
+        "citations": [
+            {"source_name": c["source_name"], "score": c["score"]} for c in context
+        ],
+    }
+
+
 def generate_draft(uploaded_by: UUID, requirement_text: str, top_k: int = 5) -> dict:
     """Retrieves context and generates a draft. Returns the prose + citations."""
-    from google import genai
-    from google.genai import types
-
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set; cannot generate a draft.")
-
     context = search_similar(uploaded_by, requirement_text, top_k=top_k)
     prompt = _assemble_prompt(requirement_text, context)
 
-    from app.core import telemetry
-
-    client = genai.Client(api_key=api_key)
-    _start = telemetry.now()
-    try:
-        response = client.models.generate_content(
-            model=_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(system_instruction=_SYSTEM_PROMPT),
-        )
-    except Exception:
-        telemetry.record_error(_MODEL, _start)
-        raise
-    telemetry.record_response(_MODEL, response, _start)
+    text = get_llm().generate_text(prompt, system=_SYSTEM_PROMPT)
     # Guardrail: reject empty/degenerate generations before they reach the DB.
-    draft = validate_draft(response.text or "")
+    draft = validate_draft(text)
     logger.info(
         "generate_draft: produced %d chars from %d context block(s)",
         len(draft),

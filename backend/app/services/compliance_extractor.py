@@ -1,13 +1,11 @@
 import asyncio
 import logging
-import os
 from typing import Literal, Optional, TypedDict
 
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-_MODEL = "gemini-2.0-flash"
 _SYSTEM_PROMPT = (
     "You are a government contracting compliance analyst. "
     "Extract every hard compliance rule, deliverable, and vendor requirement "
@@ -45,48 +43,22 @@ class ExtractionState(TypedDict):
 # ---------------------------------------------------------------------------
 
 def _extract_compliance_node(state: ExtractionState) -> ExtractionState:
-    """Single graph node: calls Gemini (google-genai SDK) with structured output."""
-    from google import genai
-    from google.genai import types
-
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set; cannot run compliance extraction.")
-
-    from app.core import telemetry
-
-    client = genai.Client(api_key=api_key)
+    """Single graph node: structured extraction via the configured LLM provider."""
+    from app.services.llm import get_llm
 
     logger.info(
-        "_extract_compliance_node: sending %d chars of markdown to %s",
+        "_extract_compliance_node: sending %d chars of markdown to the LLM",
         len(state["markdown_text"]),
-        _MODEL,
     )
-    _start = telemetry.now()
-    try:
-        response = client.models.generate_content(
-            model=_MODEL,
-            contents=f"DOCUMENT:\n{state['markdown_text']}",
-            config=types.GenerateContentConfig(
-                system_instruction=_SYSTEM_PROMPT,
-                response_mime_type="application/json",
-                response_schema=ComplianceMatrix,
-            ),
-        )
-    except Exception:
-        telemetry.record_error(_MODEL, _start)
-        raise
-    telemetry.record_response(_MODEL, response, _start)
-
-    # google-genai parses the JSON straight into the Pydantic schema.
-    result: ComplianceMatrix = response.parsed
-    if result is None:
-        raise RuntimeError("Gemini returned no parseable ComplianceMatrix.")
+    result: ComplianceMatrix = get_llm().generate_structured(
+        f"DOCUMENT:\n{state['markdown_text']}",
+        ComplianceMatrix,
+        system=_SYSTEM_PROMPT,
+    )
     logger.info(
         "_extract_compliance_node: received %d requirements from LLM",
         len(result.requirements),
     )
-
     return {"markdown_text": state["markdown_text"], "requirements": result}
 
 

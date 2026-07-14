@@ -107,6 +107,75 @@ def count_requirements(rfp_id: UUID) -> int:
     return count
 
 
+def get_requirements(rfp_id: UUID) -> list[dict]:
+    """Returns the extracted compliance requirements for a document.
+
+    Used by the drafting agent to plan and ground proposal sections. Ordered by
+    creation so a positional reference index is stable within a single run.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT requirement_id, section_number, raw_text_content, category "
+                "FROM extracted_requirements WHERE rfp_id = %s ORDER BY created_at;",
+                (str(rfp_id),),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "requirement_id": str(r[0]),
+            "section_number": r[1],
+            "raw_text_content": r[2],
+            "category": r[3],
+        }
+        for r in rows
+    ]
+
+
+def insert_proposal_section(
+    rfp_id: UUID,
+    section_title: str,
+    content: str,
+    requirement_id: UUID | None = None,
+    status: str = "needs_review",
+) -> UUID:
+    """Inserts one drafted proposal section and returns its id.
+
+    `requirement_id` is the *primary* requirement the section answers (the schema
+    links one section → one requirement); a section may cover several, tracked in
+    its content. A join table can normalise the many-to-many mapping later.
+    """
+    section_id = uuid4()
+    conn = get_connection()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO proposal_sections
+                    (section_id, rfp_id, requirement_id, section_title,
+                     generated_draft_content, status)
+                VALUES (%s, %s, %s, %s, %s, %s);
+                """,
+                (
+                    str(section_id),
+                    str(rfp_id),
+                    str(requirement_id) if requirement_id else None,
+                    section_title,
+                    content,
+                    status,
+                ),
+            )
+    finally:
+        conn.close()
+    logger.info(
+        "Inserted proposal_section %s (%s) for rfp_document %s", section_id, status, rfp_id
+    )
+    return section_id
+
+
 def insert_requirements(rfp_id: UUID, matrix: "ComplianceMatrix") -> int:
     """Bulk-inserts extracted requirements for a document. Returns rows written."""
     if not matrix.requirements:

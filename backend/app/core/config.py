@@ -14,6 +14,14 @@ class Settings(BaseSettings):
         validation_alias="DATABASE_URL",
     )
 
+    # --- LLM provider (decoupled via app/services/llm) ---
+    # Swap AI platforms by changing llm_provider + implementing an adapter.
+    llm_provider: str = Field(default="gemini", validation_alias="LLM_PROVIDER")
+    llm_model: str = Field(default="gemini-2.0-flash", validation_alias="LLM_MODEL")
+    embedding_model: str = Field(
+        default="text-embedding-004", validation_alias="EMBEDDING_MODEL"
+    )
+
     # --- S3 / object storage (Story 2.2) ---
     use_localstack: bool = Field(default=True, validation_alias="USE_LOCALSTACK")
     localstack_endpoint: str = Field(
