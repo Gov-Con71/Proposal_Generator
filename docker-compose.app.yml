@@ -1,0 +1,156 @@
+# Full application stack: frontend + backend + worker + databases.
+# One command brings up the entire app:
+#
+#   cp .env.example .env   # then set GEMINI_API_KEY
+#   docker compose -f docker-compose.app.yml up --build
+#
+# Endpoints: frontend http://localhost:3000 · backend http://localhost:8000/docs
+#
+# Related files: docker-compose.yml = backend stack only (no frontend);
+# docker-compose.db.yml = databases only. Config/secrets come from the root .env.
+
+services:
+  db:
+    image: ankane/pgvector:latest
+    container_name: rfp_postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data:Z  # :Z for Podman SELinux handling
+      - ./backend/init_scripts:/docker-entrypoint-initdb.d:Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: rfp_redis
+    restart: always
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  localstack:
+    image: localstack/localstack:3
+    container_name: rfp_localstack
+    restart: always
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+    ports:
+      - "${LOCALSTACK_PORT:-4566}:4566"
+    networks:
+      - app-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.backend
+    container_name: fastapi_backend_app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/code:Z
+    environment:
+      # Internal URLs use compose hostnames, credentials from .env.
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - USE_LOCALSTACK=true
+      - LOCALSTACK_ENDPOINT=http://localstack:4566
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-proposal-artifacts-local}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - CACHE_URL=redis://redis:6379/2
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      - LLM_MODEL=${LLM_MODEL:-gemini-2.0-flash}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-004}
+      # Override in production — the app default is intentionally insecure.
+      - JWT_SECRET=${JWT_SECRET:-dev-insecure-change-me}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - SENTRY_DSN=${SENTRY_DSN:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_started
+    networks:
+      - app-network
+
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.backend
+    container_name: rfp_celery_worker
+    restart: always
+    command: celery -A app.worker.celery_app:celery_app worker --loglevel=info --concurrency=2
+    volumes:
+      - ./backend:/code:Z
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - USE_LOCALSTACK=true
+      - LOCALSTACK_ENDPOINT=http://localstack:4566
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-proposal-artifacts-local}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      - LLM_MODEL=${LLM_MODEL:-gemini-2.0-flash}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-004}
+      # GEMINI_API_KEY must be provided via .env for extraction/drafting.
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_started
+    networks:
+      - app-network
+
+  frontend:
+    build:
+      context: ./proposalai-frontend
+      dockerfile: Dockerfile
+    container_name: proposalai_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+      # NEXT_PUBLIC_* is inlined at build time; the browser calls the backend
+      # on the host port, so localhost:8000 is correct for a local run.
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      - NEXT_PUBLIC_APP_NAME=ProposalAI
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+
+networks:
+  app-network:
+    driver: bridge
