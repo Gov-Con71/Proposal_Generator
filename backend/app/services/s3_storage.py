@@ -74,3 +74,8 @@ class S3Storage:
         self.client.download_file(self.bucket_name, key, dest_path)
         logger.info("Downloaded s3://%s/%s → %s", self.bucket_name, key, dest_path)
         return dest_path
+
+    def download_bytes(self, key: str) -> bytes:
+        """Reads an S3 object fully into memory (used to stream export artifacts)."""
+        obj = self.client.get_object(Bucket=self.bucket_name, Key=key)
+        return obj["Body"].read()

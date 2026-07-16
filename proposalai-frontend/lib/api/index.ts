@@ -141,6 +141,15 @@ export const complianceApi = {
     apiClient.get(`/proposals/${proposalId}/compliance`).then((r) => r.data),
 }
 
+// ─── integrity.ts ─────────────────────────────────────────────────────────────
+import type { IntegrityItem } from '@/types'
+
+export const integrityApi = {
+  // Pre-export checklist derived server-side from the compliance matrix + sections.
+  list: (proposalId: string) =>
+    apiClient.get<IntegrityItem[]>(`/proposals/${proposalId}/integrity`).then((r) => r.data),
+}
+
 // ─── profile.ts ───────────────────────────────────────────────────────────────
 import type { CompanyProfile } from '@/types/index'
 

@@ -54,7 +54,10 @@ def update_requirement(
     user_id: UUID = Depends(get_current_user_id),
 ):
     result = _guard(ws.update_requirement, requirement_id, user_id, patch)
-    cache.cache_delete(cache.requirements_key(user_id, result.proposal_id))
+    cache.cache_delete(
+        cache.requirements_key(user_id, result.proposal_id),
+        cache.compliance_key(user_id, result.proposal_id),
+    )
     return result
 
 
@@ -63,7 +66,10 @@ def delete_requirement(
     requirement_id: UUID, user_id: UUID = Depends(get_current_user_id)
 ):
     rfp_id = _guard(ws.delete_requirement, requirement_id, user_id)
-    cache.cache_delete(cache.requirements_key(user_id, rfp_id))
+    cache.cache_delete(
+        cache.requirements_key(user_id, rfp_id),
+        cache.compliance_key(user_id, rfp_id),
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

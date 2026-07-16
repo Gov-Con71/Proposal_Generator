@@ -49,6 +49,19 @@ export function useSections(proposalId: string) {
   })
 }
 
+// ─── use-integrity.ts ─────────────────────────────────────────────────────────
+import { integrityApi } from '@/lib/api'
+import { MOCK_INTEGRITY_ITEMS } from '@/lib/constants/mock-data'
+
+export function useIntegrity(proposalId: string) {
+  return useQuery({
+    queryKey: ['integrity', proposalId],
+    queryFn: () => integrityApi.list(proposalId),
+    placeholderData: MOCK_INTEGRITY_ITEMS,
+    enabled: !!proposalId,
+  })
+}
+
 // ─── use-compliance.ts ────────────────────────────────────────────────────────
 import { useState } from 'react'
 import type { ComplianceStatus } from '@/types'
@@ -75,6 +88,7 @@ export function useCompliance(proposalId: string) {
 // ─── use-profile.ts ───────────────────────────────────────────────────────────
 import { profileApi } from '@/lib/api'
 import { MOCK_PROFILE } from '@/lib/constants/mock-data'
+import type { CompanyProfile } from '@/types'
 
 export function useProfile() {
   return useQuery({
@@ -84,10 +98,21 @@ export function useProfile() {
   })
 }
 
+export function useSaveProfile() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: Partial<CompanyProfile>) => profileApi.save(data),
+    onSuccess: (saved) => {
+      qc.setQueryData(['profile'], saved)  // reflect the persisted profile immediately
+    },
+  })
+}
+
 // ─── use-processing.ts ────────────────────────────────────────────────────────
 import { useEffect, useRef } from 'react'
 import type { Pipeline } from '@/types'
 import { MOCK_PIPELINE } from '@/lib/constants/mock-data'
+import { useAuthStore } from '@/lib/stores/auth-store'
 
 export function useProcessing(
   proposalId: string,
@@ -99,8 +124,12 @@ export function useProcessing(
   useEffect(() => {
     if (!proposalId) return
 
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL
-    const es = new EventSource(`${apiUrl}/proposals/${proposalId}/pipeline/stream`)
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+    // EventSource can't set an Authorization header, so pass the JWT as a query
+    // param — the backend scopes the stream to the owning tenant when present.
+    const token = useAuthStore.getState().accessToken
+    const url = `${apiUrl}/proposals/${proposalId}/pipeline/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`
+    const es = new EventSource(url)
     esRef.current = es
 
     es.onmessage = (e) => {
@@ -188,4 +217,49 @@ export function useSaveSection(proposalId: string) {
       sectionsApi.update(id, content),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['sections', proposalId] }),
   })
+}
+
+// ─── use-export-download.ts ───────────────────────────────────────────────────
+import { exportApi } from '@/lib/api'
+import type { ExportFormat } from '@/types'
+
+/** Drives the full export flow imperatively: create job → poll until ready →
+ *  download the blob → trigger a browser save. */
+export function useExportDownload() {
+  const [status, setStatus] = useState<'idle' | 'working' | 'failed'>('idle')
+  const [error, setError] = useState<string | null>(null)
+
+  async function download(proposalId: string, format: ExportFormat) {
+    setError(null)
+    setStatus('working')
+    try {
+      let job = await exportApi.create(proposalId, format)
+
+      // Poll the job until the worker finishes rendering (cap at ~60s).
+      const startedAt = Date.now()
+      while (job.status !== 'ready' && job.status !== 'failed') {
+        if (Date.now() - startedAt > 60_000) throw new Error('Export timed out — please try again.')
+        await new Promise((r) => setTimeout(r, 1000))
+        job = await exportApi.get(job.id)
+      }
+      if (job.status === 'failed' || !job.downloadUrl) throw new Error('Export generation failed.')
+
+      const blob = await exportApi.download(job.downloadUrl)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `proposal-${proposalId}.${format}`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      setStatus('idle')
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } }; message?: string }
+      setError(err.response?.data?.detail || err.message || 'Export failed.')
+      setStatus('failed')
+    }
+  }
+
+  return { download, status, error }
 }

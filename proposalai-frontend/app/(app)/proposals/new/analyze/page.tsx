@@ -6,7 +6,8 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Input, Textarea, Select } from '@/components/ui/input'
 import { Card, StepIndicator } from '@/components/ui/card'
-import { MOCK_PROFILE } from '@/lib/constants/mock-data'
+import { useProfile } from '@/lib/hooks'
+import type { CompanyProfile } from '@/types'
 import type { Step } from '@/components/ui/card'
 
 const STEPS: Step[] = [
@@ -17,12 +18,19 @@ const STEPS: Step[] = [
 ]
 
 export default function AnalyzePage() {
+  const { data: profile } = useProfile()
+  if (!profile) return null
+  // Re-mount when real data replaces the placeholder so uncontrolled inputs re-init.
+  return <AnalyzeForm key={profile.id} profile={profile} />
+}
+
+function AnalyzeForm({ profile }: { profile: CompanyProfile }) {
   const router = useRouter()
-  const [certs, setCerts] = useState(MOCK_PROFILE.certifications)
+  const [certs, setCerts] = useState(profile.certifications)
   const [certInput, setCertInput] = useState('')
-  const [socio, setSocio] = useState(MOCK_PROFILE.socioEconomicStatus)
+  const [socio, setSocio] = useState(profile.socioEconomicStatus)
   const [socioInput, setSocioInput] = useState('')
-  const [pastPerf, setPastPerf] = useState(MOCK_PROFILE.pastPerformance)
+  const [pastPerf, setPastPerf] = useState(profile.pastPerformance)
   const [draftingLevel, setDraftingLevel] = useState<'technical' | 'executive'>('technical')
 
   function addCert() {
@@ -51,17 +59,17 @@ export default function AnalyzePage() {
         <p className="text-[10px] font-medium text-primary-600 tracking-wider uppercase mb-3">Company Identity</p>
         <div className="grid grid-cols-2 gap-3">
           <div className="col-span-2">
-            <Input label="Legal Entity Name" defaultValue={MOCK_PROFILE.legalName} />
+            <Input label="Legal Entity Name" defaultValue={profile.legalName} />
           </div>
-          <Input label="CAGE Code"   defaultValue={MOCK_PROFILE.cageCode} />
-          <Input label="UEI Number"  defaultValue={MOCK_PROFILE.ueiNumber} />
+          <Input label="CAGE Code"   defaultValue={profile.cageCode} />
+          <Input label="UEI Number"  defaultValue={profile.ueiNumber} />
         </div>
       </Card>
 
       {/* Technical capability */}
       <Card className="mb-4">
         <p className="text-[10px] font-medium text-primary-600 tracking-wider uppercase mb-3">Technical Capability</p>
-        <Textarea label="Capabilities Overview" defaultValue={MOCK_PROFILE.capabilitiesOverview} rows={4} className="mb-3" />
+        <Textarea label="Capabilities Overview" defaultValue={profile.capabilitiesOverview} rows={4} className="mb-3" />
         <p className="text-xs text-[var(--text-secondary)] mb-2">Certifications &amp; Clearances</p>
         <div className="flex flex-wrap gap-1.5 mb-2">
           {certs.map((c) => (
