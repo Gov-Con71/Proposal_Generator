@@ -7,23 +7,24 @@ import { Badge, ProposalStatusBadge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ProgressBar } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { MOCK_PROPOSALS } from '@/lib/constants/mock-data'
+import { useProposals } from '@/lib/hooks'
 import { formatDate, formatCurrency } from '@/lib/utils/format'
 
 export default function DashboardPage() {
   const [search, setSearch] = useState('')
+  const { data: proposals = [] } = useProposals()
 
-  const filtered = MOCK_PROPOSALS.filter(
+  const filtered = proposals.filter(
     (p) =>
       p.title.toLowerCase().includes(search.toLowerCase()) ||
       p.solicitationNumber.toLowerCase().includes(search.toLowerCase()) ||
       p.agency.toLowerCase().includes(search.toLowerCase())
   )
 
-  const total      = MOCK_PROPOSALS.length
-  const inProgress = MOCK_PROPOSALS.filter((p) => p.status === 'in_progress' || p.status === 'review_needed' || p.status === 'incomplete').length
-  const submitted  = MOCK_PROPOSALS.filter((p) => p.status === 'submitted').length
-  const avgCompliance = Math.round(MOCK_PROPOSALS.reduce((a, p) => a + p.complianceScore, 0) / total)
+  const total      = proposals.length
+  const inProgress = proposals.filter((p) => p.status === 'in_progress' || p.status === 'review_needed' || p.status === 'incomplete').length
+  const submitted  = proposals.filter((p) => p.status === 'submitted').length
+  const avgCompliance = total ? Math.round(proposals.reduce((a, p) => a + p.complianceScore, 0) / total) : 0
 
   return (
     <div className="page-padding">

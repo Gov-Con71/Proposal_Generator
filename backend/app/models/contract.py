@@ -220,3 +220,177 @@ class HistorySource(CamelModel):
 class HistoryIngestResponse(CamelModel):
     source_name: str
     chunks: int
+
+
+# ---------------------------------------------------------------------------
+# Proposal write-side (create / update) — persisted in the proposals table
+# ---------------------------------------------------------------------------
+
+class ProposalCreate(CamelModel):
+    """Partial<Proposal> from the client's `proposalsApi.create`.
+
+    Every field is optional so the frontend can create a shell proposal and
+    fill it in later. `document_id` links the created proposal to an already
+    uploaded/ingested RFP.
+    """
+
+    title: Optional[str] = None
+    solicitation_number: Optional[str] = None
+    agency: Optional[str] = None
+    due_date: Optional[str] = None
+    document_id: Optional[str] = None
+    contract_type: Optional[str] = None
+    naics_code: Optional[str] = None
+    naics_description: Optional[str] = None
+    pricing_model: Optional[str] = None
+    target_profit_margin: Optional[float] = None
+    drafting_level: Optional[Literal["technical", "executive"]] = None
+    tone: Optional[str] = None
+    page_limit: Optional[int] = None
+
+
+class ProposalUpdate(ProposalCreate):
+    """Same optional field set as create; used by `proposalsApi.update` (PATCH)."""
+
+    status: Optional[ProposalStatus] = None
+
+
+# ---------------------------------------------------------------------------
+# Company profile (Story: /profile) — persisted in the company_profiles table
+# ---------------------------------------------------------------------------
+
+class PastPerformance(CamelModel):
+    id: str
+    contract_number: str
+    agency: str
+    value: float
+    scope: str
+    period: str
+
+
+class CompanyProfile(CamelModel):
+    id: str
+    legal_name: str = ""
+    duns_number: str = ""
+    uei_number: str = ""
+    primary_address: str = ""
+    cage_code: str = ""
+    naics_code: str = ""
+    naics_description: str = ""
+    cmmc_level: str = ""
+    socio_economic_status: list[str] = []
+    annual_revenue: float = 0
+    fringe_rate: float = 0
+    overhead_rate: float = 0
+    ga_rate: float = 0
+    capabilities_overview: str = ""
+    certifications: list[str] = []
+    security_clearance: str = ""
+    past_performance: list[PastPerformance] = []
+    updated_at: str
+
+
+class CompanyProfileUpdate(CamelModel):
+    """Partial<CompanyProfile> accepted by PUT /profile."""
+
+    legal_name: Optional[str] = None
+    duns_number: Optional[str] = None
+    uei_number: Optional[str] = None
+    primary_address: Optional[str] = None
+    cage_code: Optional[str] = None
+    naics_code: Optional[str] = None
+    naics_description: Optional[str] = None
+    cmmc_level: Optional[str] = None
+    socio_economic_status: Optional[list[str]] = None
+    annual_revenue: Optional[float] = None
+    fringe_rate: Optional[float] = None
+    overhead_rate: Optional[float] = None
+    ga_rate: Optional[float] = None
+    capabilities_overview: Optional[str] = None
+    certifications: Optional[list[str]] = None
+    security_clearance: Optional[str] = None
+    past_performance: Optional[list[PastPerformance]] = None
+
+
+# ---------------------------------------------------------------------------
+# Compliance matrix (GET /proposals/{id}/compliance) — real, derived from
+# extracted_requirements via workspace_service.
+# ---------------------------------------------------------------------------
+
+class ComplianceCounts(CamelModel):
+    all: int
+    addressed: int
+    partial: int
+    missing: int
+    na: int
+
+
+class ComplianceMatrix(CamelModel):
+    proposal_id: str
+    compliance_score: int
+    counts: ComplianceCounts
+    requirements: list[Requirement]
+
+
+# ---------------------------------------------------------------------------
+# Pre-export integrity checks (GET /proposals/{id}/integrity) — derived from
+# the compliance matrix + sections.
+# ---------------------------------------------------------------------------
+
+IntegrityStatus = Literal["verified", "review_required", "missing"]
+
+
+class IntegrityItem(CamelModel):
+    id: str
+    label: str
+    status: IntegrityStatus
+
+
+# ---------------------------------------------------------------------------
+# Exports (POST /exports, GET /exports/{id}) — persisted in the export_jobs table
+# ---------------------------------------------------------------------------
+
+ExportFormat = Literal["pdf", "docx", "xlsx", "zip"]
+ExportStatus = Literal["pending", "generating", "ready", "failed"]
+
+
+class ExportCreateRequest(CamelModel):
+    proposal_id: str
+    format: ExportFormat
+
+
+class ExportJob(CamelModel):
+    id: str
+    proposal_id: str
+    format: ExportFormat
+    status: ExportStatus
+    download_url: Optional[str] = None
+    created_at: str
+    expires_at: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Pipeline progress stream (GET /proposals/{id}/pipeline/stream, SSE)
+# ---------------------------------------------------------------------------
+
+PipelineStepStatus = Literal["pending", "running", "completed", "failed"]
+PipelineRunStatus = Literal["idle", "running", "completed", "failed"]
+
+
+class PipelineStep(CamelModel):
+    id: str
+    label: str
+    description: str
+    status: PipelineStepStatus
+    completed_at: Optional[str] = None
+    meta: Optional[str] = None
+
+
+class Pipeline(CamelModel):
+    proposal_id: str
+    status: PipelineRunStatus
+    overall_progress: int
+    steps: list[PipelineStep]
+    started_at: str
+    completed_at: Optional[str] = None
+    status_message: Optional[str] = None

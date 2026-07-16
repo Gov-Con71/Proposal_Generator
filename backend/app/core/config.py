@@ -7,8 +7,8 @@ class Settings(BaseSettings):
 
     app_name: str = "AI Proposal Platform API"
     debug: bool = True
-    # Default lets the mock contract / Swagger docs boot without a live DB.
-    # The real proposals endpoint still requires a reachable database at request time.
+    # Default lets the app / Swagger docs boot without a live DB; every
+    # persistence-backed route still requires a reachable database at request time.
     database_url: str = Field(
         default="postgresql://postgres:postgres@localhost:5432/rfp_proposal_db",
         validation_alias="DATABASE_URL",

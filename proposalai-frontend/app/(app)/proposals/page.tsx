@@ -4,11 +4,12 @@ import { ExternalLink } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { ProposalStatusBadge } from '@/components/ui/badge'
 import { ProgressBar } from '@/components/ui/card'
-import { MOCK_PROPOSALS } from '@/lib/constants/mock-data'
+import { useProposals } from '@/lib/hooks'
 import { formatDate } from '@/lib/utils/format'
 
 export default function ProposalsPage() {
-  const archived = MOCK_PROPOSALS.filter((p) => p.status === 'submitted')
+  const { data: proposals = [] } = useProposals()
+  const archived = proposals.filter((p) => p.status === 'submitted')
 
   return (
     <div className="page-padding">

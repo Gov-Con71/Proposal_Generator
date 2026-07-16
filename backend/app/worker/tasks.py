@@ -3,6 +3,7 @@
 import logging
 
 from app.agent import run_drafting_sync
+from app.services.export_service import run_export_render
 from app.services.ingestion import run_ingestion_sync
 from app.worker.celery_app import celery_app
 
@@ -50,4 +51,25 @@ def draft_proposal(self, rfp_id: str) -> dict:
         return {"rfp_id": rfp_id, "sections": result["sections"], "status": "drafted"}
     except Exception as exc:
         logger.exception("draft_proposal failed for %s", rfp_id)
+        raise self.retry(exc=exc)
+
+
+@celery_app.task(
+    name="render_export",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=10,
+    acks_late=True,
+)
+def render_export(self, job_id: str) -> dict:
+    """Renders one export job's artifact to S3 and marks it ready.
+
+    The export service has already flagged the row 'failed' before the
+    exception reaches us; retries cover transient S3/DB hiccups.
+    """
+    logger.info("Task render_export received job_id=%s", job_id)
+    try:
+        return run_export_render(job_id)
+    except Exception as exc:
+        logger.exception("render_export failed for %s", job_id)
         raise self.retry(exc=exc)

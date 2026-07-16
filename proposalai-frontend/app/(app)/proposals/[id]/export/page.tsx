@@ -4,7 +4,7 @@ import { CheckCircle2, AlertCircle, XCircle, Download, ArrowLeft, Lock, FileText
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { MOCK_INTEGRITY_ITEMS } from '@/lib/constants/mock-data'
+import { useIntegrity, useExportDownload } from '@/lib/hooks'
 import { cn } from '@/lib/utils/cn'
 import type { ExportFormat, IntegrityStatus } from '@/types'
 
@@ -27,12 +27,18 @@ function integrityLabel(status: IntegrityStatus) {
   return { text: 'Missing', cls: 'text-danger-600 font-medium' }
 }
 
-const totalIssues = MOCK_INTEGRITY_ITEMS.filter((i) => i.status !== 'verified').length
-const complete    = Math.round((MOCK_INTEGRITY_ITEMS.filter((i) => i.status === 'verified').length / MOCK_INTEGRITY_ITEMS.length) * 100)
-
 export default function ExportPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
   const [selectedFormat, setSelectedFormat] = useState<ExportFormat>('pdf')
+
+  const { download, status: exportStatus, error: exportError } = useExportDownload()
+
+  // Real pre-export checklist derived from the proposal's compliance + sections.
+  const { data: integrityItems = [] } = useIntegrity(id)
+  const totalIssues = integrityItems.filter((i) => i.status !== 'verified').length
+  const complete    = integrityItems.length
+    ? Math.round((integrityItems.filter((i) => i.status === 'verified').length / integrityItems.length) * 100)
+    : 0
 
   return (
     <div className="min-h-screen bg-neutral-50 flex flex-col items-center pt-12 px-4">
@@ -48,7 +54,7 @@ export default function ExportPage({ params }: { params: Promise<{ id: string }>
             </span>
           </div>
           <div className="space-y-2.5">
-            {MOCK_INTEGRITY_ITEMS.map((item) => {
+            {integrityItems.map((item) => {
               const { text, cls } = integrityLabel(item.status)
               return (
                 <div key={item.id} className="flex items-center justify-between gap-3">
@@ -91,11 +97,21 @@ export default function ExportPage({ params }: { params: Promise<{ id: string }>
           </div>
         </Card>
 
+        {exportError && (
+          <p className="text-xs text-danger-600 text-center mb-2">{exportError}</p>
+        )}
         <div className="flex items-center justify-between mb-6">
           <Button variant="default" icon={<ArrowLeft className="w-3.5 h-3.5" />} asChild>
             <Link href={`/proposals/${id}/workspace`}>Back to editing</Link>
           </Button>
-          <Button variant="primary" icon={<Download className="w-3.5 h-3.5" />}>Download export</Button>
+          <Button
+            variant="primary"
+            icon={<Download className="w-3.5 h-3.5" />}
+            loading={exportStatus === 'working'}
+            onClick={() => download(id, selectedFormat)}
+          >
+            {exportStatus === 'working' ? `Generating ${selectedFormat.toUpperCase()}…` : 'Download export'}
+          </Button>
         </div>
 
         <p className="flex items-center justify-center gap-1.5 text-[10px] text-neutral-400">

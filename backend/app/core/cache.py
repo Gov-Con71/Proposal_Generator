@@ -62,3 +62,7 @@ def requirements_key(user_id, rfp_id) -> str:
 
 def sections_key(user_id, rfp_id) -> str:
     return f"secs:{user_id}:{rfp_id}"
+
+
+def compliance_key(user_id, rfp_id) -> str:
+    return f"compliance:{user_id}:{rfp_id}"

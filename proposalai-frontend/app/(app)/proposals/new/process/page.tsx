@@ -1,10 +1,10 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { use } from 'react'
 import { useRouter } from 'next/navigation'
-import { CheckCircle2, Loader2, Circle, ArrowRight, Clock } from 'lucide-react'
+import { CheckCircle2, Loader2, Circle, XCircle, ArrowRight, Clock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, StepIndicator } from '@/components/ui/card'
-import { MOCK_PIPELINE } from '@/lib/constants/mock-data'
+import { useProcessing } from '@/lib/hooks'
 import { cn } from '@/lib/utils/cn'
 import type { PipelineStep } from '@/types'
 import type { Step } from '@/components/ui/card'
@@ -16,31 +16,22 @@ const STEPS: Step[] = [
   { label: 'Review',     status: 'pending' },
 ]
 
-export default function ProcessPage() {
+export default function ProcessPage({ searchParams }: { searchParams: Promise<{ rfp?: string }> }) {
   const router = useRouter()
-  const [progress, setProgress] = useState(64)
-  const [statusMsg, setStatusMsg] = useState(MOCK_PIPELINE.statusMessage || '')
+  const { rfp } = use(searchParams)
 
-  // Simulate progress ticking up
-  useEffect(() => {
-    const msgs = [
-      'Optimizing vector embeddings for better retrieval...',
-      'Generating executive summary draft...',
-      'Mapping compliance requirements to sections...',
-      'Finalizing proposal structure...',
-    ]
-    let i = 0
-    const interval = setInterval(() => {
-      setProgress((p) => Math.min(p + 4, 100))
-      setStatusMsg(msgs[i % msgs.length])
-      i++
-    }, 1200)
-    return () => clearInterval(interval)
-  }, [])
+  // Live ingestion progress for the uploaded RFP (SSE). On completion, hand off
+  // to the workspace for that document.
+  const pipeline = useProcessing(rfp ?? '', () => {
+    if (rfp) router.push(`/proposals/${rfp}/workspace`)
+  })
+  const progress = pipeline.overallProgress
+  const statusMsg = pipeline.statusMessage ?? ''
 
   function StepIcon({ step }: { step: PipelineStep }) {
     if (step.status === 'completed') return <CheckCircle2 className="w-5 h-5 text-success-400" />
     if (step.status === 'running')   return <Loader2 className="w-5 h-5 text-primary-600 animate-spin" />
+    if (step.status === 'failed')    return <XCircle className="w-5 h-5 text-danger-600" />
     return <Circle className="w-5 h-5 text-[var(--text-tertiary)]" />
   }
 
@@ -59,7 +50,7 @@ export default function ProcessPage() {
           </p>
 
           <div className="space-y-3">
-            {MOCK_PIPELINE.steps.map((step) => (
+            {pipeline.steps.map((step) => (
               <div key={step.id} className={cn(
                 'flex items-center gap-3 py-2 px-3 rounded-lg',
                 step.status === 'running' && 'bg-[var(--bg-secondary)]'
@@ -99,7 +90,7 @@ export default function ProcessPage() {
           </div>
 
           <div className="flex justify-end mt-4">
-            <Button variant="default" size="sm" icon={<ArrowRight className="w-3.5 h-3.5" />} iconPosition="right" onClick={() => router.push('/proposals/1/workspace')}>
+            <Button variant="default" size="sm" icon={<ArrowRight className="w-3.5 h-3.5" />} iconPosition="right" onClick={() => router.push(rfp ? `/proposals/${rfp}/workspace` : '/dashboard')}>
               Skip to workspace
             </Button>
           </div>

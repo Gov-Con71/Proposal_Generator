@@ -1,12 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1 import proposals
 from app.api.v1 import documents
 from app.api.v1 import auth
 from app.api.v1 import history
 from app.api.v1 import workspace
+from app.api.v1 import compliance
+from app.api.v1 import profile
+from app.api.v1 import exports
+from app.api.v1 import pipeline
 from app.api.v1 import monitoring
-from app.api.mock import proposals as mock_proposals
+from app.api.v1 import proposals_crud
 from app.core.config import settings
 
 # --- Error reporting (Story 5.4) — no-op unless SENTRY_DSN is configured ---
@@ -22,12 +25,9 @@ if settings.sentry_dsn:
 DESCRIPTION = """
 Interactive API contract for the AI Proposal Platform.
 
-**Story 1.3 — Contract sign-off.** The `(mock)` routers below publish the
-request/response shapes the frontend (`proposalai-frontend/lib/api`) and AI
-layer build against, with deterministic mock responses. They mirror the
-frontend TypeScript types exactly (camelCase JSON).
-
-Real, persistence-backed routes live under `/api/v1`.
+All routes are real and persistence-backed (Postgres + pgvector, S3 for
+artifacts, Redis/Celery for async work). Responses mirror the frontend
+TypeScript types exactly (camelCase JSON) — see `proposalai-frontend/lib/api`.
 """
 
 tags_metadata = [
@@ -35,8 +35,9 @@ tags_metadata = [
     {"name": "Documents", "description": "Live RFP upload → S3 streaming → async ingestion pipeline (Sprint 2)."},
     {"name": "Workspace", "description": "Requirement/section CRUD + RAG draft writer (Sprint 3)."},
     {"name": "History (RAG)", "description": "Past-performance ingestion into the pgvector store (Sprint 3)."},
-    {"name": "Proposals (mock)", "description": "Proposal list/detail (no proposals table yet)."},
-    {"name": "Proposals", "description": "Live, DB-backed proposal persistence."},
+    {"name": "Profile", "description": "Company profile read/write (Sprint 5)."},
+    {"name": "Exports", "description": "Proposal export job lifecycle: create → poll → download (Sprint 5)."},
+    {"name": "Proposals", "description": "Live, DB-backed proposal CRUD (Sprint 6)."},
 ]
 
 app = FastAPI(
@@ -66,12 +67,15 @@ app.include_router(documents.router)
 # --- RAG workspace + history (Sprint 3) ---
 app.include_router(workspace.router)
 app.include_router(history.router)
+app.include_router(compliance.router)
 
-# --- Story 1.3: mock contract routers (read-side, still awaiting real impl) ---
-app.include_router(mock_proposals.router)
+# --- Company profile + exports + live pipeline stream (frontend contract) ---
+app.include_router(profile.router)
+app.include_router(exports.router)
+app.include_router(pipeline.router)
 
-# --- Live, DB-backed routes ---
-app.include_router(proposals.router, prefix="/api/v1")
+# --- Live, DB-backed proposal CRUD (Sprint 6) ---
+app.include_router(proposals_crud.router)
 
 
 @app.get("/")
