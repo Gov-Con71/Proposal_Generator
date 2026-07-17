@@ -89,12 +89,13 @@ export default function UploadPage() {
       const res = await documentsApi.upload(file, setProgress)
       // Guard the handoff: without an id the next step would stream against
       // /proposals/undefined/… and 422 on every poll.
-      if (!res.rfpId) {
-        setError('The server accepted the upload but returned no document id. Please retry.')
+      if (!res.proposalId) {
+        setError('The server accepted the upload but returned no proposal id. Please retry.')
         setUploading(false)
         return
       }
-      router.push(`/proposals/new/process?rfp=${res.rfpId}`)
+      // Navigate by proposal id — the whole /proposals/… namespace is keyed on it.
+      router.push(`/proposals/new/process?proposal=${res.proposalId}`)
     } catch (e) {
       const err = e as { response?: { status?: number; data?: { detail?: string } } }
       const detail = err.response?.data?.detail

@@ -173,6 +173,33 @@ def exists_owned(proposal_id: UUID, user_id: UUID) -> bool:
     ) is not None
 
 
+class NoLinkedDocumentError(Exception):
+    """The proposal exists and is owned, but has no ingested RFP behind it."""
+
+
+def rfp_for_proposal(proposal_id: UUID, user_id: UUID) -> UUID:
+    """Resolves the proposal the client addresses to the document its
+    requirements and sections actually hang off.
+
+    The proposal is the aggregate the whole `/proposals/{id}` namespace is keyed
+    on; `extracted_requirements` and `proposal_sections` are keyed on `rfp_id`.
+    This is the single seam between the two, so no route has to know that.
+
+    Raises NotFoundError (missing or another tenant's — deliberately identical,
+    so ownership doesn't leak) or NoLinkedDocumentError (a proposal drafted
+    before an RFP was attached).
+    """
+    row = _fetchone(
+        "SELECT rfp_id FROM proposals WHERE proposal_id = %s AND owned_by = %s;",
+        (str(proposal_id), str(user_id)),
+    )
+    if row is None:
+        raise NotFoundError(f"proposal {proposal_id}")
+    if row["rfp_id"] is None:
+        raise NoLinkedDocumentError(f"proposal {proposal_id} has no linked RFP")
+    return row["rfp_id"]
+
+
 def create_proposal(user_id: UUID, payload: ProposalCreate) -> Proposal:
     data = payload.model_dump(exclude_none=True)
     rfp_id = _resolve_rfp_link(data.pop("document_id", None), user_id)

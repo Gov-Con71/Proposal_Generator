@@ -109,7 +109,8 @@ export type ComplianceStatus = 'addressed' | 'partial' | 'missing' | 'na'
 
 export interface Requirement {
   id: string
-  proposalId: string
+  /** The RFP this was extracted from (an rfp_id), matching Proposal.documentId. */
+  documentId: string
   number: number
   section: string
   text: string
@@ -138,7 +139,8 @@ export interface AIFlag {
 
 export interface ProposalSection {
   id: string
-  proposalId: string
+  /** The RFP this section is drafted against (an rfp_id). */
+  documentId: string
   title: string
   content: string
   status: SectionStatus

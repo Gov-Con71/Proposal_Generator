@@ -17,14 +17,14 @@ const STEPS: Step[] = [
   { label: 'Review',     status: 'pending' },
 ]
 
-export default function ProcessPage({ searchParams }: { searchParams: Promise<{ rfp?: string }> }) {
+export default function ProcessPage({ searchParams }: { searchParams: Promise<{ proposal?: string }> }) {
   const router = useRouter()
-  const { rfp } = use(searchParams)
+  const { proposal } = use(searchParams)
 
   // Live ingestion progress for the uploaded RFP (SSE). On completion, hand off
   // to the review step, which summarises what was actually extracted.
-  const { pipeline, connectionError } = useProcessing(rfp ?? '', () => {
-    if (rfp) router.push(`/proposals/new/review?rfp=${rfp}`)
+  const { pipeline, connectionError } = useProcessing(proposal ?? '', () => {
+    if (proposal) router.push(`/proposals/new/review?proposal=${proposal}`)
   })
   const progress = pipeline.overallProgress
   const statusMsg = pipeline.statusMessage ?? ''
@@ -37,9 +37,9 @@ export default function ProcessPage({ searchParams }: { searchParams: Promise<{ 
     return <Circle className="w-5 h-5 text-[var(--text-tertiary)]" />
   }
 
-  // Reaching this page without an rfp id means the upload handoff broke. Say so
+  // Reaching this page without a proposal id means the upload handoff broke. Say so
   // rather than opening a stream against /proposals/undefined/….
-  if (!rfp) {
+  if (!proposal) {
     return (
       <div className="min-h-[calc(100vh-44px)] bg-[var(--bg-secondary)] flex items-center justify-center px-4">
         <Card className="w-full max-w-lg">
@@ -67,7 +67,7 @@ export default function ProcessPage({ searchParams }: { searchParams: Promise<{ 
             onRetry={() => window.location.reload()}
           />
           <div className="flex justify-center pb-4">
-            <Button variant="default" size="sm" onClick={() => router.push(`/proposals/${rfp}/workspace`)}>
+            <Button variant="default" size="sm" onClick={() => router.push(`/proposals/${proposal}/workspace`)}>
               Open workspace
             </Button>
           </div>
@@ -133,7 +133,7 @@ export default function ProcessPage({ searchParams }: { searchParams: Promise<{ 
           </div>
 
           <div className="flex justify-end mt-4">
-            <Button variant="default" size="sm" icon={<ArrowRight className="w-3.5 h-3.5" />} iconPosition="right" onClick={() => router.push(rfp ? `/proposals/${rfp}/workspace` : '/dashboard')}>
+            <Button variant="default" size="sm" icon={<ArrowRight className="w-3.5 h-3.5" />} iconPosition="right" onClick={() => router.push(proposal ? `/proposals/${proposal}/workspace` : '/dashboard')}>
               Skip to workspace
             </Button>
           </div>

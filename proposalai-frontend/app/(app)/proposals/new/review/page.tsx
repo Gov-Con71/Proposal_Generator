@@ -6,7 +6,7 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card, Skeleton, StepIndicator } from '@/components/ui/card'
 import { EmptyState, ErrorState } from '@/components/ui/state'
-import { useDocumentStatus, useRequirements, useSections, useProfile } from '@/lib/hooks'
+import { useProposal, useDocumentStatus, useRequirements, useSections, useProfile } from '@/lib/hooks'
 import type { Step } from '@/components/ui/card'
 
 const STEPS: Step[] = [
@@ -16,18 +16,21 @@ const STEPS: Step[] = [
   { label: 'Review',     status: 'active' },
 ]
 
-export default function ReviewPage({ searchParams }: { searchParams: Promise<{ rfp?: string }> }) {
+export default function ReviewPage({ searchParams }: { searchParams: Promise<{ proposal?: string }> }) {
   const router = useRouter()
-  const { rfp } = use(searchParams)
-  const id = rfp ?? ''
+  const { proposal } = use(searchParams)
+  const id = proposal ?? ''
 
-  const document = useDocumentStatus(id)
+  // Requirements and sections are addressed by proposal id. Ingestion status is
+  // a property of the document, so it's fetched via the proposal's documentId.
+  const proposalQuery = useProposal(id)
+  const document = useDocumentStatus(proposalQuery.data?.documentId ?? '')
   const requirements = useRequirements(id)
   const sections = useSections(id)
   const profile = useProfile()
 
-  // Reaching review without an rfp id means the flow lost the uploaded document.
-  if (!rfp) {
+  // Reaching review without a proposal id means the flow lost the upload.
+  if (!proposal) {
     return (
       <div className="content-narrow">
         <StepIndicator steps={STEPS} className="mb-6" />
@@ -46,8 +49,10 @@ export default function ReviewPage({ searchParams }: { searchParams: Promise<{ r
     )
   }
 
-  const isLoading = document.isLoading || requirements.isLoading
-  const failed = document.isError || requirements.isError
+  // `document` stays pending until the proposal resolves its documentId, so the
+  // proposal query gates the loading state rather than sitting alongside it.
+  const isLoading = proposalQuery.isLoading || requirements.isLoading || document.isLoading
+  const failed = proposalQuery.isError || requirements.isError || document.isError
 
   if (failed) {
     return (
@@ -56,8 +61,8 @@ export default function ReviewPage({ searchParams }: { searchParams: Promise<{ r
         <Card>
           <ErrorState
             title="Could not load the proposal summary"
-            error={document.error ?? requirements.error}
-            onRetry={() => { document.refetch(); requirements.refetch() }}
+            error={proposalQuery.error ?? requirements.error ?? document.error}
+            onRetry={() => { proposalQuery.refetch(); requirements.refetch(); document.refetch() }}
           />
         </Card>
       </div>
@@ -69,12 +74,18 @@ export default function ReviewPage({ searchParams }: { searchParams: Promise<{ r
   const pastPerformance = profile.data?.pastPerformance.length ?? 0
   const drafted = sections.data?.length ?? 0
 
-  // Only rows backed by real data. Solicitation, agency, contract type and tone
-  // live on a `proposals` row, which uploading an RFP doesn't create yet — so
-  // they're deliberately absent rather than invented.
+  // Only rows backed by real data. Solicitation number, agency and contract type
+  // exist on the proposal but are blank until ingestion or the user fills them
+  // in, so they're shown only once they hold something rather than as empty rows.
+  const optional = (label: string, value?: string) =>
+    value && value.trim() ? [{ label, value }] : []
+
   const summary: { label: string; value: string }[] = [
+    { label: 'Proposal',            value: proposalQuery.data?.title || '—' },
     { label: 'Document',            value: document.data?.fileName ?? '—' },
     { label: 'Ingestion status',    value: document.data?.processingStatus ?? '—' },
+    ...optional('Solicitation', proposalQuery.data?.solicitationNumber),
+    ...optional('Agency', proposalQuery.data?.agency),
     { label: 'Requirements found',  value: `${reqs.length}${reqs.length ? ` (${mandatory} mandatory)` : ''}` },
     { label: 'Sections drafted',    value: String(drafted) },
     { label: 'Past performance on file', value: `${pastPerformance} contract${pastPerformance === 1 ? '' : 's'}` },
@@ -129,9 +140,9 @@ export default function ReviewPage({ searchParams }: { searchParams: Promise<{ r
 
       <div className="flex justify-between">
         <Button variant="default" icon={<ArrowLeft className="w-3.5 h-3.5" />} asChild>
-          <Link href={`/proposals/new/process?rfp=${rfp}`}>Back</Link>
+          <Link href={`/proposals/new/process?proposal=${proposal}`}>Back</Link>
         </Button>
-        <Button variant="primary" onClick={() => router.push(`/proposals/${rfp}/workspace`)}>
+        <Button variant="primary" onClick={() => router.push(`/proposals/${proposal}/workspace`)}>
           Open workspace →
         </Button>
       </div>

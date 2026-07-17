@@ -234,9 +234,12 @@ def test_export_rejects_unknown_or_foreign_proposal(
     monkeypatch.setattr(settings, "use_localstack", False)
     auth = _auth(seeded_proposal["user_id"])
 
-    # unknown proposal id and malformed id -> 404
+    # A well-formed id that doesn't exist -> 404.
     assert test_client.post("/exports", json={"proposalId": str(uuid.uuid4()), "format": "pdf"}, headers=auth).status_code == 404
-    assert test_client.post("/exports", json={"proposalId": "not-a-uuid", "format": "pdf"}, headers=auth).status_code == 404
+
+    # A malformed id is invalid input, not a missing resource -> 422 from request
+    # validation, consistent with every other route that takes a UUID.
+    assert test_client.post("/exports", json={"proposalId": "not-a-uuid", "format": "pdf"}, headers=auth).status_code == 422
 
     # A real second tenant gets 404, not 403 — existence must not leak.
     other = _auth(other_user)

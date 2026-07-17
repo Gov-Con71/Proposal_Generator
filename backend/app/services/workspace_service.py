@@ -68,7 +68,7 @@ def assert_rfp_owner(rfp_id: UUID, user_id: UUID) -> None:
 def _to_requirement(row: dict, number: int) -> Requirement:
     return Requirement(
         id=str(row["requirement_id"]),
-        proposal_id=str(row["rfp_id"]),
+        document_id=str(row["rfp_id"]),
         number=number,
         section=row.get("section_number") or "",
         text=row["raw_text_content"],
@@ -176,7 +176,7 @@ def _to_section(row: dict) -> ProposalSection:
     status = row.get("status") or ("empty" if not content else "draft")
     return ProposalSection(
         id=str(row["section_id"]),
-        proposal_id=str(row["rfp_id"]),
+        document_id=str(row["rfp_id"]),
         title=row["section_title"],
         content=content,
         status=status,

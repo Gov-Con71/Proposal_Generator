@@ -7,6 +7,7 @@ actually made) to keep the API import chain and unit tests SDK-free.
 """
 
 import logging
+import math
 import os
 from typing import Optional, Type, TypeVar
 
@@ -18,6 +19,21 @@ from app.services.llm.base import LLMProvider
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _unit(vector: list[float]) -> list[float]:
+    """Scales a vector to unit length.
+
+    Gemini only pre-normalises embeddings at the full 3072 dimensions; truncated
+    outputs come back unnormalised (a 768-dim vector measures ~0.59). Retrieval
+    uses cosine (`<=>`), which is magnitude-invariant and so unaffected either
+    way — but storing unit vectors matches the vendor's guidance and keeps a
+    future switch to inner-product (`<#>`) from silently skewing scores.
+    """
+    magnitude = math.sqrt(sum(component * component for component in vector))
+    if magnitude == 0:
+        return vector
+    return [component / magnitude for component in vector]
 
 
 class GeminiProvider(LLMProvider):
@@ -85,17 +101,24 @@ class GeminiProvider(LLMProvider):
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        from google.genai import types
+
         start = telemetry.now()
         try:
+            # output_dimensionality must be sent explicitly: gemini-embedding-001
+            # defaults to 3072, which would not fit historical_chunks.embedding
+            # (vector(768)) and fails the insert.
             result = self._client().models.embed_content(
-                model=self._embed_model, contents=texts
+                model=self._embed_model,
+                contents=texts,
+                config=types.EmbedContentConfig(output_dimensionality=self._embed_dim),
             )
         except Exception:
             telemetry.record_error(self._embed_model, start)
             raise
         telemetry.record_response(self._embed_model, result, start)
         logger.info("embed: %d text(s) via %s", len(texts), self._embed_model)
-        return [list(e.values) for e in result.embeddings]
+        return [_unit(list(e.values)) for e in result.embeddings]
 
     @property
     def embedding_dim(self) -> int:

@@ -31,16 +31,14 @@ def create_export(
 
     The client polls GET /exports/{id} until status is 'ready', then downloads.
     """
+    # A malformed id never reaches here — request validation rejects it (422).
     # The export_jobs FK requires a proposal this tenant owns; reject early with
-    # a clean 404 rather than letting the insert fail on the constraint.
-    try:
-        proposal_id = UUID(payload.proposal_id)
-    except ValueError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Proposal not found.")
-    if not proposals_service.exists_owned(proposal_id, user_id):
+    # a clean 404 rather than letting the insert fail on the constraint. Another
+    # tenant's proposal is a 404 too, so ownership doesn't leak.
+    if not proposals_service.exists_owned(payload.proposal_id, user_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Proposal not found.")
 
-    job = export_service.create_job(user_id, str(proposal_id), payload.format)
+    job = export_service.create_job(user_id, str(payload.proposal_id), payload.format)
     celery_app.send_task("render_export", args=[job.id])
     return job
 

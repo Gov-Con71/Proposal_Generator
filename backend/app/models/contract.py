@@ -10,6 +10,7 @@ These power the Swagger `/docs` contract used for front-end / AI sign-off.
 """
 
 from typing import Literal, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
@@ -137,7 +138,10 @@ class Proposal(ProposalSummary):
 
 class Requirement(CamelModel):
     id: str
-    proposal_id: str
+    # The RFP this was extracted from. Named documentId to match Proposal.documentId
+    # — it is an rfp_id, and calling it proposalId (as it was) is what let the
+    # two id spaces be confused in the first place (GAP_ANALYSIS §1.2).
+    document_id: str
     number: int
     section: str
     text: str
@@ -158,7 +162,7 @@ class AIFlag(CamelModel):
 
 class ProposalSection(CamelModel):
     id: str
-    proposal_id: str
+    document_id: str  # the rfp_id this section is drafted against; see Requirement
     title: str
     content: str
     status: SectionStatus
@@ -345,7 +349,10 @@ ExportStatus = Literal["pending", "generating", "ready", "failed"]
 
 
 class ExportCreateRequest(CamelModel):
-    proposal_id: str
+    # Typed as UUID so request validation rejects a malformed id with a 422,
+    # matching every other route that takes one. Parsing it by hand here meant
+    # bad input was reported as "Proposal not found".
+    proposal_id: UUID
     format: ExportFormat
 
 

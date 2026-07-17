@@ -18,8 +18,8 @@ const STEPS: Step[] = [
   { label: 'Review',     status: 'pending' },
 ]
 
-export default function AnalyzePage({ searchParams }: { searchParams: Promise<{ rfp?: string }> }) {
-  const { rfp } = use(searchParams)
+export default function AnalyzePage({ searchParams }: { searchParams: Promise<{ proposal?: string }> }) {
+  const { proposal } = use(searchParams)
   const { data: profile, isLoading, isError, error, refetch } = useProfile()
 
   if (isLoading) {
@@ -42,10 +42,10 @@ export default function AnalyzePage({ searchParams }: { searchParams: Promise<{ 
     )
   }
   // Re-mount once the profile arrives so uncontrolled inputs re-init.
-  return <AnalyzeForm key={profile.id} profile={profile} rfp={rfp} />
+  return <AnalyzeForm key={profile.id} profile={profile} proposal={proposal} />
 }
 
-function AnalyzeForm({ profile, rfp }: { profile: CompanyProfile; rfp?: string }) {
+function AnalyzeForm({ profile, proposal }: { profile: CompanyProfile; proposal?: string }) {
   const router = useRouter()
   const [certs, setCerts] = useState(profile.certifications)
   const [certInput, setCertInput] = useState('')
@@ -192,11 +192,11 @@ function AnalyzeForm({ profile, rfp }: { profile: CompanyProfile; rfp?: string }
         <Button variant="default" asChild><Link href="/proposals/new">Back</Link></Button>
         <div className="flex gap-2">
           <Button variant="default">Save Draft</Button>
-          {/* Carry the uploaded document id forward — the process step streams
-              against it, and dropping it strands the flow with no RFP. */}
+          {/* Carry the proposal id forward — the process step streams against
+              it, and dropping it strands the flow with nothing to show. */}
           <Button
             variant="primary"
-            onClick={() => router.push(rfp ? `/proposals/new/process?rfp=${rfp}` : '/proposals/new/process')}
+            onClick={() => router.push(proposal ? `/proposals/new/process?proposal=${proposal}` : '/proposals/new/process')}
           >
             Generate Proposal
           </Button>

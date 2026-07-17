@@ -22,8 +22,13 @@ _INTEGRITY_LABELS = [
 ]
 
 
-def build_matrix(rfp_id: UUID, user_id: UUID) -> ComplianceMatrix:
-    """Raises ws.NotFoundError if the rfp is missing or not owned by the tenant."""
+def build_matrix(rfp_id: UUID, user_id: UUID, proposal_id: UUID | None = None) -> ComplianceMatrix:
+    """Builds the matrix for `rfp_id`, reported against `proposal_id`.
+
+    `proposal_id` is what the client addressed; it defaults to the rfp_id for
+    callers that have no proposal in hand (the integrity check). Raises
+    ws.NotFoundError if the rfp is missing or not owned by the tenant.
+    """
     requirements = ws.list_requirements(rfp_id, user_id)
 
     counts = ComplianceCounts(
@@ -44,7 +49,7 @@ def build_matrix(rfp_id: UUID, user_id: UUID) -> ComplianceMatrix:
     )
 
     return ComplianceMatrix(
-        proposal_id=str(rfp_id),
+        proposal_id=str(proposal_id or rfp_id),
         compliance_score=score,
         counts=counts,
         requirements=requirements,
