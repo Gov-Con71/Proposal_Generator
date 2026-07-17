@@ -1,15 +1,17 @@
 """Proposal drafting agent — the AI writer (Sprint 3).
 
-A bounded LangGraph state machine that turns an RFP's extracted compliance
-matrix into a full set of drafted `proposal_sections`:
+Turns an RFP's extracted compliance matrix into a full set of drafted
+`proposal_sections`:
 
-    load_requirements → plan_outline
-        → (draft_section → check_compliance → [revise ↺ | save_section])* → END
+    load_context → plan_outline → fan out over sections (bounded concurrency):
+        (draft_section → check_compliance → [revise ↺ | save_section]) → END
 
-Each section is grounded in the tenant's past-performance context via the RAG
-retriever (`draft_writer.generate_section_draft`), reviewed by a compliance
-critic that can send it back for up to `_MAX_ATTEMPTS` revisions, and guardrail-
-validated before it is persisted.
+Loading and planning run once up front; each planned section is then drafted by
+its own bounded LangGraph subgraph, and up to `_MAX_CONCURRENCY` sections draft
+in parallel (they are independent). Each section is grounded in the tenant's
+past-performance context via the RAG retriever (`generate_section_draft`),
+reviewed by a compliance critic that can send it back for up to `_MAX_ATTEMPTS`
+revisions, and guardrail-validated before it is persisted.
 
 Design mirrors `compliance_extractor.py`: langgraph is imported lazily so this
 module stays import-safe and out of the API import chain; LLM calls go through
@@ -46,13 +48,18 @@ _CRITIC_SYSTEM_PROMPT = (
     "the gaps. Be strict but fair; do not demand facts the writer cannot know."
 )
 
-# LangGraph counts every node visit against a recursion limit (default 25). The
-# per-section draft→check→save loop plus revisions uses several visits per
-# section, so raise the ceiling.
-_RECURSION_LIMIT = 200
+# LangGraph counts every node visit against a recursion limit (default 25). One
+# section's draft→check→save subgraph plus its revisions stays well under that,
+# but we keep a comfortable ceiling in case _MAX_ATTEMPTS is raised.
+_RECURSION_LIMIT = 50
 
 # Total draft attempts per section (1 initial + up to 2 critic-driven revisions).
 _MAX_ATTEMPTS = 3
+
+# How many sections draft concurrently. Sections are independent, so we fan out —
+# but each fires up to _MAX_ATTEMPTS LLM calls, so this bounds concurrent Gemini
+# requests to keep clear of provider rate limits.
+_MAX_CONCURRENCY = 4
 
 
 # ---------------------------------------------------------------------------
@@ -76,33 +83,33 @@ class ComplianceReview(BaseModel):
     addressed: bool = Field(
         description="True only if the draft satisfies every requirement."
     )
+    # No `default`: Gemini rejects any default in a structured-output response
+    # schema, and this one silently broke the critic on every run. The field is
+    # required instead — the prompt tells the model to return "" when addressed.
     feedback: str = Field(
-        default="", description="Specific gaps to fix; empty when addressed."
+        description="Specific gaps to fix; empty string when fully addressed."
     )
 
 
 # ---------------------------------------------------------------------------
-# Graph state
+# Per-section graph state
 # ---------------------------------------------------------------------------
 
 class DraftingState(TypedDict):
     rfp_id: str
     uploaded_by: str
-    requirements: list[dict]      # loaded compliance rows; list position == ref index
-    outline: list[dict]           # resolved sections (title/brief/requirement_ids/texts/content)
-    current_idx: int
-    attempts: int                 # draft attempts spent on the current section
+    section: dict                 # one resolved section (title/brief/requirement_ids/texts/content)
+    attempts: int                 # draft attempts spent on this section
     feedback: Optional[str]       # critic feedback to fold into the next attempt
-    saved_section_ids: list[str]
+    section_id: Optional[str]     # id of the persisted section, set by save_section
 
 
 # ---------------------------------------------------------------------------
-# Nodes
+# Loading + planning (run once, up front)
 # ---------------------------------------------------------------------------
 
-def _load_requirements_node(state: DraftingState) -> DraftingState:
+def _load_context(rfp_id: UUID) -> tuple[str, list[dict]]:
     """Loads the document owner + its extracted requirements."""
-    rfp_id = UUID(state["rfp_id"])
     document = docs.get_document(rfp_id)
     requirements = docs.get_requirements(rfp_id)
     if not requirements:
@@ -110,15 +117,7 @@ def _load_requirements_node(state: DraftingState) -> DraftingState:
             f"No extracted requirements for rfp {rfp_id}; run ingestion first."
         )
     logger.info("drafting: loaded %d requirement(s) for rfp %s", len(requirements), rfp_id)
-    return {
-        **state,
-        "uploaded_by": str(document["uploaded_by"]),
-        "requirements": requirements,
-        "current_idx": 0,
-        "attempts": 0,
-        "feedback": None,
-        "saved_section_ids": [],
-    }
+    return str(document["uploaded_by"]), requirements
 
 
 def _call_planner(listing: str) -> ProposalOutline:
@@ -131,9 +130,8 @@ def _call_planner(listing: str) -> ProposalOutline:
     )
 
 
-def _plan_outline_node(state: DraftingState) -> DraftingState:
+def _plan_outline(rfp_id: UUID, requirements: list[dict]) -> list[dict]:
     """Groups requirements into proposal sections via Gemini structured output."""
-    requirements = state["requirements"]
     # Present each requirement with an integer ref; the model echoes refs (not
     # UUIDs), which we resolve back to real ids below — far less error-prone.
     listing = "\n".join(
@@ -158,27 +156,24 @@ def _plan_outline_node(state: DraftingState) -> DraftingState:
                 "requirement_texts": [requirements[r]["raw_text_content"] for r in valid_refs],
             }
         )
-    logger.info("drafting: planned %d section(s) for rfp %s", len(outline), state["rfp_id"])
-    return {**state, "outline": outline, "current_idx": 0}
+    logger.info("drafting: planned %d section(s) for rfp %s", len(outline), rfp_id)
+    return outline
 
+
+# ---------------------------------------------------------------------------
+# Per-section subgraph nodes
+# ---------------------------------------------------------------------------
 
 def _draft_section_node(state: DraftingState) -> DraftingState:
-    """Drafts the current section, grounded in retrieved past-performance context.
+    """Drafts this section, grounded in retrieved past-performance context.
 
     Runs on the first pass and on each critic-driven revision; `attempts` counts
     how many drafts this section has consumed and `feedback` carries the critic's
     notes into a revision.
     """
-    idx = state["current_idx"]
-    section = state["outline"][idx]
+    section = state["section"]
     attempts = state["attempts"] + 1
-    logger.info(
-        "drafting: section %d/%d — %s (attempt %d)",
-        idx + 1,
-        len(state["outline"]),
-        section["title"],
-        attempts,
-    )
+    logger.info("drafting: section '%s' (attempt %d)", section["title"], attempts)
     # Fall back to the brief when the planner mapped no requirements to a section.
     requirement_texts = section["requirement_texts"] or [section["brief"]]
     try:
@@ -190,13 +185,17 @@ def _draft_section_node(state: DraftingState) -> DraftingState:
         )
         content = result["content"]
     except DraftGuardrailError as exc:
-        # Keep the run going; mark the section for human attention at save time.
+        # Expected rejection: keep the run going; flag for human attention at save.
         logger.warning("drafting: section '%s' failed guardrail: %s", section["title"], exc)
         content = None
+    except Exception:
+        # Isolate any other draft-time failure (retrieval, LLM timeout, etc.) to
+        # this section so one bad section can't sink the whole proposal run. It
+        # is persisted empty and surfaced for a human, same as a guardrail reject.
+        logger.exception("drafting: section '%s' draft failed unexpectedly", section["title"])
+        content = None
 
-    outline = list(state["outline"])
-    outline[idx] = {**section, "content": content}
-    return {**state, "outline": outline, "attempts": attempts}
+    return {**state, "section": {**section, "content": content}, "attempts": attempts}
 
 
 def _call_critic(
@@ -217,15 +216,22 @@ def _call_critic(
 
 def _check_compliance_node(state: DraftingState) -> DraftingState:
     """Critiques the current draft; sets `feedback` when a revision is warranted."""
-    idx = state["current_idx"]
-    section = state["outline"][idx]
+    section = state["section"]
     content = section.get("content")
     # Nothing to review if drafting was guardrail-rejected or the section has no
     # concrete requirements to check against — proceed straight to save.
     if not content or not section["requirement_texts"]:
         return {**state, "feedback": None}
 
-    review = _call_critic(section["title"], section["requirement_texts"], content)
+    try:
+        review = _call_critic(section["title"], section["requirement_texts"], content)
+    except Exception:
+        # A failed critic must neither sink the run nor silently pass the draft:
+        # skip revision and let it through as needs_review for a human to verify.
+        logger.exception(
+            "drafting: compliance review failed for '%s'; saving unreviewed", section["title"]
+        )
+        return {**state, "feedback": None}
     if review is None or review.addressed:
         return {**state, "feedback": None}
     logger.info(
@@ -243,58 +249,44 @@ def _after_check(state: DraftingState) -> str:
 
 
 def _save_section_node(state: DraftingState) -> DraftingState:
-    """Persists the current drafted section and advances the loop cursor."""
-    idx = state["current_idx"]
-    section = state["outline"][idx]
+    """Persists this drafted section and records its id."""
+    section = state["section"]
     content = section.get("content")
     status = "needs_review" if content else "empty"
     primary_req = section["requirement_ids"][0] if section["requirement_ids"] else None
+    # If the section is saved with the critic still flagging gaps (revision budget
+    # spent), keep that feedback so a reviewer sees why it needs review.
+    review_notes = state.get("feedback") if content else None
     section_id = docs.insert_proposal_section(
         rfp_id=UUID(state["rfp_id"]),
         section_title=section["title"],
         content=content or "",
         requirement_id=UUID(primary_req) if primary_req else None,
         status=status,
+        review_notes=review_notes,
     )
-    return {
-        **state,
-        "current_idx": idx + 1,
-        "attempts": 0,      # reset the revision budget for the next section
-        "feedback": None,
-        "saved_section_ids": state["saved_section_ids"] + [str(section_id)],
-    }
-
-
-def _has_more_sections(state: DraftingState) -> str:
-    """Conditional edge: loop back for the next section, or finish."""
-    return "draft" if state["current_idx"] < len(state["outline"]) else "done"
+    return {**state, "section_id": str(section_id)}
 
 
 # ---------------------------------------------------------------------------
-# Graph wiring (compiled once, reused)
+# Graph wiring (compiled once, reused across sections and runs)
 # ---------------------------------------------------------------------------
 
 def _build_graph():
     from langgraph.graph import StateGraph, START, END
 
     graph = StateGraph(DraftingState)
-    graph.add_node("load_requirements", _load_requirements_node)
-    graph.add_node("plan_outline", _plan_outline_node)
     graph.add_node("draft_section", _draft_section_node)
     graph.add_node("check_compliance", _check_compliance_node)
     graph.add_node("save_section", _save_section_node)
 
-    graph.add_edge(START, "load_requirements")
-    graph.add_edge("load_requirements", "plan_outline")
-    graph.add_edge("plan_outline", "draft_section")
+    graph.add_edge(START, "draft_section")
     # draft → critic → (revise ↺ draft | save), bounded by _MAX_ATTEMPTS.
     graph.add_edge("draft_section", "check_compliance")
     graph.add_conditional_edges(
         "check_compliance", _after_check, {"revise": "draft_section", "save": "save_section"}
     )
-    graph.add_conditional_edges(
-        "save_section", _has_more_sections, {"draft": "draft_section", "done": END}
-    )
+    graph.add_edge("save_section", END)
     return graph.compile()
 
 
@@ -315,35 +307,60 @@ def _get_graph():
 async def run_drafting(rfp_id: UUID) -> dict:
     """Drafts a full proposal for one RFP. Returns a summary of saved sections.
 
-    Tracks progress on rfp_documents.processing_status as a post-ingestion
-    lifecycle phase: 'drafting' → 'drafted' (or 'draft_failed' on error).
+    Loads + plans once, then fans out over sections with bounded concurrency
+    (`_MAX_CONCURRENCY`). Tracks progress on rfp_documents.processing_status as a
+    post-ingestion lifecycle phase: 'drafting' → 'drafted' (or 'draft_failed').
     """
     rfp = UUID(str(rfp_id))
-    initial: DraftingState = {
-        "rfp_id": str(rfp),
-        "uploaded_by": "",
-        "requirements": [],
-        "outline": [],
-        "current_idx": 0,
-        "attempts": 0,
-        "feedback": None,
-        "saved_section_ids": [],
-    }
     docs.update_status(rfp, "drafting")
     try:
-        # LangGraph invoke is synchronous; bridge to the event loop like the extractor.
-        final: DraftingState = await asyncio.to_thread(
-            _get_graph().invoke, initial, {"recursion_limit": _RECURSION_LIMIT}
-        )
+        # Loading + planning are blocking (DB + one LLM call); run off the loop.
+        uploaded_by, requirements = await asyncio.to_thread(_load_context, rfp)
+        outline = await asyncio.to_thread(_plan_outline, rfp, requirements)
+
+        # Compile the graph once, up front — off the fan-out — so the langgraph
+        # import + compile isn't paid inside (and raced by) the first wave of
+        # concurrent section invokes.
+        await asyncio.to_thread(_get_graph)
+
+        semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
+
+        async def _draft_one(section: dict) -> Optional[str]:
+            state: DraftingState = {
+                "rfp_id": str(rfp),
+                "uploaded_by": uploaded_by,
+                "section": section,
+                "attempts": 0,
+                "feedback": None,
+                "section_id": None,
+            }
+            async with semaphore:
+                try:
+                    # LangGraph invoke is synchronous; run each section's subgraph in
+                    # a worker thread so up to _MAX_CONCURRENCY overlap their calls.
+                    final: DraftingState = await asyncio.to_thread(
+                        _get_graph().invoke, state, {"recursion_limit": _RECURSION_LIMIT}
+                    )
+                except Exception:
+                    # Isolate an unexpected per-section failure (e.g. the DB save)
+                    # so one section can't sink the whole run; the in-node guards
+                    # already absorb draft/critic errors.
+                    logger.exception("drafting: section '%s' failed; skipping", section["title"])
+                    return None
+                return final["section_id"]
+
+        section_ids = await asyncio.gather(*(_draft_one(s) for s in outline))
     except Exception:
         docs.update_status(rfp, "draft_failed")
         logger.exception("drafting failed for rfp=%s", rfp)
         raise
+
+    saved = [sid for sid in section_ids if sid]
     docs.update_status(rfp, "drafted")
     return {
         "rfp_id": str(rfp),
-        "sections": len(final["saved_section_ids"]),
-        "section_ids": final["saved_section_ids"],
+        "sections": len(saved),
+        "section_ids": saved,
     }
 
 

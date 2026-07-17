@@ -3,7 +3,8 @@
 Exercises the real LangGraph flow against a live Postgres, isolating only the
 two external LLM touchpoints:
 
-    load_requirements → plan_outline (stubbed) → (draft_section (stubbed) → save_section)* → END
+    load_context → plan_outline (stubbed) → fan out per section:
+        (draft_section (stubbed) → check_compliance (stubbed) → save_section) → END
 
 Requirements to run (same as test_ingestion_pipeline.py):
   * a reachable Postgres with the init + rag schema applied
@@ -68,7 +69,7 @@ def _fetch_sections(rfp_id: str) -> list[dict]:
     conn = psycopg2.connect(settings.database_url)
     cur = conn.cursor()
     cur.execute(
-        "SELECT section_title, generated_draft_content, requirement_id, status "
+        "SELECT section_title, generated_draft_content, requirement_id, status, review_notes "
         "FROM proposal_sections WHERE rfp_id = %s ORDER BY section_title;",
         (rfp_id,),
     )
@@ -76,7 +77,13 @@ def _fetch_sections(rfp_id: str) -> list[dict]:
     cur.close()
     conn.close()
     return [
-        {"title": r[0], "content": r[1], "requirement_id": str(r[2]) if r[2] else None, "status": r[3]}
+        {
+            "title": r[0],
+            "content": r[1],
+            "requirement_id": str(r[2]) if r[2] else None,
+            "status": r[3],
+            "review_notes": r[4],
+        }
         for r in rows
     ]
 
@@ -160,4 +167,109 @@ def test_critic_drives_one_revision(seeded_rfp, monkeypatch):
     sections = _fetch_sections(rfp_id)
     assert len(sections) == 1
     assert sections[0]["content"] == "Draft v2."
+    assert sections[0]["status"] == "needs_review"
+
+
+def test_draft_failure_is_isolated_to_section(seeded_rfp, monkeypatch):
+    """A non-guardrail draft failure must not sink the run: the section is
+    persisted empty/needs-attention and drafting continues (fix #1)."""
+    rfp_id = seeded_rfp["rfp_id"]
+    req_ids = seeded_rfp["req_ids"]
+
+    def fake_planner(_listing):
+        return ProposalOutline(
+            sections=[PlannedSection(section_title="Technical Approach", requirement_refs=[0], brief="t")]
+        )
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)  # never reached
+
+    # The writer blows up with a non-guardrail error (e.g. retrieval / LLM timeout).
+    def exploding_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None):
+        raise RuntimeError("retrieval backend unavailable")
+
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", exploding_section_draft)
+
+    result = drafting_agent.run_drafting_sync(rfp_id)
+
+    # The run completes and the section is still saved — empty, flagged for a human.
+    assert result["sections"] == 1
+    sections = _fetch_sections(rfp_id)
+    assert len(sections) == 1
+    assert sections[0]["content"] == ""
+    assert sections[0]["status"] == "empty"
+    assert sections[0]["requirement_id"] == req_ids[0]
+
+
+def test_exhausted_critic_persists_review_notes(seeded_rfp, monkeypatch):
+    """When the revision budget is spent with the critic still flagging gaps, the
+    section is saved needs_review with the critic's final feedback (fix #7)."""
+    rfp_id = seeded_rfp["rfp_id"]
+
+    def fake_planner(_listing):
+        return ProposalOutline(
+            sections=[PlannedSection(section_title="Technical Approach", requirement_refs=[0], brief="t")]
+        )
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    # Critic is never satisfied — always returns the same actionable gap.
+    monkeypatch.setattr(
+        drafting_agent,
+        "_call_critic",
+        lambda *a: ComplianceReview(addressed=False, feedback="Cite a specific past contract."),
+    )
+
+    draft_calls: list[str | None] = []
+
+    def fake_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None):
+        draft_calls.append(feedback)
+        return {"content": f"Draft v{len(draft_calls)}.", "citations": []}
+
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
+
+    result = drafting_agent.run_drafting_sync(rfp_id)
+
+    # Exactly _MAX_ATTEMPTS drafts, then saved needs_review with the last feedback.
+    assert len(draft_calls) == drafting_agent._MAX_ATTEMPTS
+    assert result["sections"] == 1
+    sections = _fetch_sections(rfp_id)
+    assert sections[0]["status"] == "needs_review"
+    assert sections[0]["review_notes"] == "Cite a specific past contract."
+
+
+def test_critic_failure_saves_draft_unreviewed(seeded_rfp, monkeypatch):
+    """A failing compliance critic must neither crash the run nor silently pass:
+    the draft is saved once as needs_review, with no revision loop (fix #2)."""
+    rfp_id = seeded_rfp["rfp_id"]
+
+    def fake_planner(_listing):
+        return ProposalOutline(
+            sections=[PlannedSection(section_title="Technical Approach", requirement_refs=[0], brief="t")]
+        )
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+
+    def exploding_critic(section_title, requirement_texts, draft):
+        raise RuntimeError("critic model unavailable")
+
+    monkeypatch.setattr(drafting_agent, "_call_critic", exploding_critic)
+
+    draft_calls: list[str | None] = []
+
+    def fake_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None):
+        draft_calls.append(feedback)
+        return {"content": "Draft v1.", "citations": []}
+
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
+
+    result = drafting_agent.run_drafting_sync(rfp_id)
+
+    # Exactly one draft attempt — a failed critic does not trigger a revision.
+    assert draft_calls == [None]
+
+    # The draft is persisted for a human to verify, not dropped.
+    assert result["sections"] == 1
+    sections = _fetch_sections(rfp_id)
+    assert len(sections) == 1
+    assert sections[0]["content"] == "Draft v1."
     assert sections[0]["status"] == "needs_review"

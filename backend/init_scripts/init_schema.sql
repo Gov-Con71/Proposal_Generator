@@ -20,6 +20,7 @@ CREATE TABLE rfp_documents (
     file_name VARCHAR(255) NOT NULL,
     s3_storage_key VARCHAR(512) NOT NULL, -- Points to the raw file resting inside AWS S3
     processing_status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'parsing', 'completed', 'failed'
+    solicitation_summary JSONB, -- Document-level administrative/deadline/submission/technical summary (Sprint 8)
     uploaded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -43,6 +44,7 @@ CREATE TABLE proposal_sections (
     requirement_id UUID REFERENCES extracted_requirements(requirement_id) ON DELETE SET NULL, -- Maps section explicitly to the rule it fulfills
     section_title VARCHAR(255) NOT NULL, -- e.g., "Technical Management Plan"
     generated_draft_content TEXT, -- The editable draft string compiled by the AI writer agent
+    review_notes TEXT, -- Compliance critic's unresolved feedback when a section is saved needs_review
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

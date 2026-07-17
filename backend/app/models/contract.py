@@ -171,6 +171,8 @@ class ProposalSection(CamelModel):
     ai_flags: list[AIFlag] = []
     mapped_requirement_ids: list[str] = []
     reference_tags: list[str] = []
+    # Compliance critic's unresolved feedback when the section is needs_review.
+    review_notes: Optional[str] = None
     last_edited_at: str
     last_edited_by: str
 

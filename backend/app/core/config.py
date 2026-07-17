@@ -27,6 +27,18 @@ class Settings(BaseSettings):
     embedding_model: str = Field(
         default="gemini-embedding-001", validation_alias="EMBEDDING_MODEL"
     )
+    # Per-request LLM timeout so a hung provider call can't pin a worker thread
+    # indefinitely (the drafting agent fans out several concurrent calls).
+    llm_request_timeout_seconds: int = Field(
+        default=120, validation_alias="LLM_REQUEST_TIMEOUT_SECONDS"
+    )
+    # Upper bound on characters sent to the extractors in one call. Well under
+    # gemini-2.5-flash's context, but guards against a huge RFP being silently
+    # under-attended (tail requirements dropped). Over this, input is truncated
+    # with a loud warning — chunked/map-reduce extraction is the real fix.
+    max_extraction_chars: int = Field(
+        default=600_000, validation_alias="MAX_EXTRACTION_CHARS"
+    )
 
     # --- S3 / object storage (Story 2.2) ---
     use_localstack: bool = Field(default=True, validation_alias="USE_LOCALSTACK")
