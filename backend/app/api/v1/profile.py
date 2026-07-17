@@ -11,7 +11,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends
 
-from app.core.deps import get_current_user_id
+from app.core.deps import get_current_user_id, require_writer
 from app.models.contract import CompanyProfile, CompanyProfileUpdate
 from app.services import profile_service
 
@@ -23,7 +23,7 @@ def get_profile(user_id: UUID = Depends(get_current_user_id)) -> CompanyProfile:
     return profile_service.get_profile(user_id)
 
 
-@router.put("", response_model=CompanyProfile, summary="Create or update the company profile")
+@router.put("", response_model=CompanyProfile, summary="Create or update the company profile", dependencies=[Depends(require_writer)])
 def save_profile(
     patch: CompanyProfileUpdate, user_id: UUID = Depends(get_current_user_id)
 ) -> CompanyProfile:

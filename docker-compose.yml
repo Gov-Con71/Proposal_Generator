@@ -78,7 +78,9 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
       # Override in production — the app default is intentionally insecure.
       - JWT_SECRET=${JWT_SECRET:-dev-insecure-change-me}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-30}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - SENTRY_DSN=${SENTRY_DSN:-}
     depends_on:

@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation'
 import { CheckCircle2, Loader2, Circle, XCircle, ArrowRight, Clock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, StepIndicator } from '@/components/ui/card'
+import { EmptyState, ErrorState } from '@/components/ui/state'
 import { useProcessing } from '@/lib/hooks'
 import { cn } from '@/lib/utils/cn'
 import type { PipelineStep } from '@/types'
@@ -21,18 +22,58 @@ export default function ProcessPage({ searchParams }: { searchParams: Promise<{ 
   const { rfp } = use(searchParams)
 
   // Live ingestion progress for the uploaded RFP (SSE). On completion, hand off
-  // to the workspace for that document.
-  const pipeline = useProcessing(rfp ?? '', () => {
-    if (rfp) router.push(`/proposals/${rfp}/workspace`)
+  // to the review step, which summarises what was actually extracted.
+  const { pipeline, connectionError } = useProcessing(rfp ?? '', () => {
+    if (rfp) router.push(`/proposals/new/review?rfp=${rfp}`)
   })
   const progress = pipeline.overallProgress
   const statusMsg = pipeline.statusMessage ?? ''
+  const connecting = pipeline.status === 'idle' && !connectionError
 
   function StepIcon({ step }: { step: PipelineStep }) {
     if (step.status === 'completed') return <CheckCircle2 className="w-5 h-5 text-success-400" />
     if (step.status === 'running')   return <Loader2 className="w-5 h-5 text-primary-600 animate-spin" />
     if (step.status === 'failed')    return <XCircle className="w-5 h-5 text-danger-600" />
     return <Circle className="w-5 h-5 text-[var(--text-tertiary)]" />
+  }
+
+  // Reaching this page without an rfp id means the upload handoff broke. Say so
+  // rather than opening a stream against /proposals/undefined/….
+  if (!rfp) {
+    return (
+      <div className="min-h-[calc(100vh-44px)] bg-[var(--bg-secondary)] flex items-center justify-center px-4">
+        <Card className="w-full max-w-lg">
+          <EmptyState
+            title="No document to process"
+            message="This step needs an uploaded RFP. Start from the upload page and try again."
+            action={
+              <Button variant="primary" size="sm" onClick={() => router.push('/proposals/new')}>
+                Upload an RFP
+              </Button>
+            }
+          />
+        </Card>
+      </div>
+    )
+  }
+
+  if (connectionError) {
+    return (
+      <div className="min-h-[calc(100vh-44px)] bg-[var(--bg-secondary)] flex items-center justify-center px-4">
+        <Card className="w-full max-w-lg">
+          <ErrorState
+            title="Lost connection to the processing stream"
+            message="The ingestion may still be running on the server. Reload to reconnect, or open the workspace to check."
+            onRetry={() => window.location.reload()}
+          />
+          <div className="flex justify-center pb-4">
+            <Button variant="default" size="sm" onClick={() => router.push(`/proposals/${rfp}/workspace`)}>
+              Open workspace
+            </Button>
+          </div>
+        </Card>
+      </div>
+    )
   }
 
   return (
@@ -43,7 +84,9 @@ export default function ProcessPage({ searchParams }: { searchParams: Promise<{ 
         <Card className="mb-4">
           <div className="flex items-center gap-2 mb-1">
             <Loader2 className="w-4 h-4 text-primary-600 animate-spin" />
-            <h2 className="text-sm font-medium">Processing document...</h2>
+            <h2 className="text-sm font-medium">
+              {connecting ? 'Connecting to processing stream…' : 'Processing document...'}
+            </h2>
           </div>
           <p className="text-xs text-[var(--text-tertiary)] flex items-center gap-1 mb-5">
             <Clock className="w-3 h-3" /> Estimated completion: 20-40 seconds

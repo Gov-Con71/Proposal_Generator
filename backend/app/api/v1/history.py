@@ -10,7 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
 
-from app.core.deps import get_current_user_id
+from app.core.deps import get_current_user_id, require_writer
 from app.models.contract import HistoryIngestRequest, HistoryIngestResponse, HistorySource
 from app.services import history_service as history
 
@@ -22,6 +22,7 @@ router = APIRouter(prefix="/history", tags=["History (RAG)"])
     response_model=HistoryIngestResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Ingest past-performance text into the vector store",
+    dependencies=[Depends(require_writer)],
 )
 def ingest(
     payload: HistoryIngestRequest, user_id: UUID = Depends(get_current_user_id)

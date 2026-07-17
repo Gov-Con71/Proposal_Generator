@@ -3,7 +3,8 @@ import { useState, use } from 'react'
 import { CheckCircle2, AlertCircle, XCircle, Download, ArrowLeft, Lock, FileText, FileSpreadsheet, Archive } from 'lucide-react'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
+import { Card, Skeleton } from '@/components/ui/card'
+import { EmptyState, ErrorState } from '@/components/ui/state'
 import { useIntegrity, useExportDownload } from '@/lib/hooks'
 import { cn } from '@/lib/utils/cn'
 import type { ExportFormat, IntegrityStatus } from '@/types'
@@ -34,7 +35,7 @@ export default function ExportPage({ params }: { params: Promise<{ id: string }>
   const { download, status: exportStatus, error: exportError } = useExportDownload()
 
   // Real pre-export checklist derived from the proposal's compliance + sections.
-  const { data: integrityItems = [] } = useIntegrity(id)
+  const { data: integrityItems = [], isLoading: integrityLoading, isError: integrityFailed, error: integrityError, refetch: refetchIntegrity } = useIntegrity(id)
   const totalIssues = integrityItems.filter((i) => i.status !== 'verified').length
   const complete    = integrityItems.length
     ? Math.round((integrityItems.filter((i) => i.status === 'verified').length / integrityItems.length) * 100)
@@ -49,24 +50,55 @@ export default function ExportPage({ params }: { params: Promise<{ id: string }>
         <Card className="mb-4">
           <div className="flex items-center justify-between mb-4">
             <p className="text-[10px] font-medium text-neutral-400 tracking-wider uppercase">Proposal Integrity Check</p>
-            <span className={cn('text-xs font-medium px-2 py-0.5 rounded', complete >= 90 ? 'bg-success-50 text-success-600' : 'bg-neutral-100 text-neutral-500')}>
-              {complete}% Complete
-            </span>
+            {/* Only claim a completion figure once the checklist actually loaded. */}
+            {!integrityLoading && !integrityFailed && integrityItems.length > 0 && (
+              <span className={cn('text-xs font-medium px-2 py-0.5 rounded', complete >= 90 ? 'bg-success-50 text-success-600' : 'bg-neutral-100 text-neutral-500')}>
+                {complete}% Complete
+              </span>
+            )}
           </div>
-          <div className="space-y-2.5">
-            {integrityItems.map((item) => {
-              const { text, cls } = integrityLabel(item.status)
-              return (
-                <div key={item.id} className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
-                    <IntegrityIcon status={item.status} />
-                    <span className="text-xs text-neutral-700">{item.label}</span>
+
+          {integrityLoading && (
+            <div className="space-y-2.5">
+              {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} height={16} />)}
+            </div>
+          )}
+
+          {integrityFailed && (
+            <ErrorState
+              title="Could not run the integrity check"
+              message="Exporting without it risks shipping an incomplete proposal. Retry before continuing."
+              error={integrityError}
+              onRetry={() => refetchIntegrity()}
+              className="py-6"
+            />
+          )}
+
+          {!integrityLoading && !integrityFailed && integrityItems.length === 0 && (
+            <EmptyState
+              title="Nothing to check yet"
+              message="The integrity check runs against extracted requirements and drafted sections. Add them first."
+              className="py-6"
+            />
+          )}
+
+          {!integrityLoading && !integrityFailed && integrityItems.length > 0 && (
+            <div className="space-y-2.5">
+              {integrityItems.map((item) => {
+                const { text, cls } = integrityLabel(item.status)
+                return (
+                  <div key={item.id} className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <IntegrityIcon status={item.status} />
+                      <span className="text-xs text-neutral-700">{item.label}</span>
+                    </div>
+                    <span className={cn('text-xs shrink-0', cls)}>{text}</span>
                   </div>
-                  <span className={cn('text-xs shrink-0', cls)}>{text}</span>
-                </div>
-              )
-            })}
-          </div>
+                )
+              })}
+            </div>
+          )}
+
           {totalIssues > 0 && (
             <div className="mt-4 px-3 py-2.5 bg-warning-50 border border-warning-100 rounded-lg text-xs text-warning-600">
               {totalIssues} item{totalIssues > 1 ? 's' : ''} need attention.{' '}

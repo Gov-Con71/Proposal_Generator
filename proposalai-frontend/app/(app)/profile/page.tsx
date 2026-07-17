@@ -3,16 +3,43 @@ import { useState } from 'react'
 import { X, Lock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input, Textarea, Select } from '@/components/ui/input'
-import { Card } from '@/components/ui/card'
+import { Card, Skeleton } from '@/components/ui/card'
+import { ErrorState } from '@/components/ui/state'
 import { useProfile, useSaveProfile } from '@/lib/hooks'
 import type { CompanyProfile } from '@/types'
 
 export default function ProfilePage() {
-  const { data: profile } = useProfile()
-  if (!profile) return null
-  // Re-mount the form when real data replaces the loading placeholder so the
-  // uncontrolled inputs pick up fresh defaults.
+  const { data: profile, isLoading, isError, error, refetch } = useProfile()
+
+  if (isLoading) return <ProfileSkeleton />
+  if (isError || !profile) {
+    return (
+      <div className="page-padding">
+        <ErrorState title="Could not load your company profile" error={error} onRetry={() => refetch()} />
+      </div>
+    )
+  }
+  // Re-mount the form once the profile arrives so the uncontrolled inputs pick
+  // up fresh defaults. The backend returns an empty default for new tenants.
   return <ProfileForm key={profile.id} profile={profile} />
+}
+
+function ProfileSkeleton() {
+  return (
+    <div className="page-padding">
+      <Skeleton height={20} width={180} className="mb-5" />
+      <div className="flex flex-col gap-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Card key={i}>
+            <Skeleton height={14} width={140} className="mb-4" />
+            <div className="grid grid-cols-2 gap-3">
+              {Array.from({ length: 4 }).map((__, j) => <Skeleton key={j} height={34} />)}
+            </div>
+          </Card>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 function ProfileForm({ profile }: { profile: CompanyProfile }) {

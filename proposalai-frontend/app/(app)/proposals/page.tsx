@@ -4,11 +4,12 @@ import { ExternalLink } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { ProposalStatusBadge } from '@/components/ui/badge'
 import { ProgressBar } from '@/components/ui/card'
+import { EmptyState, ErrorState, TableSkeleton } from '@/components/ui/state'
 import { useProposals } from '@/lib/hooks'
 import { formatDate } from '@/lib/utils/format'
 
 export default function ProposalsPage() {
-  const { data: proposals = [] } = useProposals()
+  const { data: proposals = [], isLoading, isError, error, refetch } = useProposals()
   const archived = proposals.filter((p) => p.status === 'submitted')
 
   return (
@@ -27,7 +28,8 @@ export default function ProposalsPage() {
             </tr>
           </thead>
           <tbody>
-            {archived.map((p) => (
+            {isLoading && <TableSkeleton cols={6} />}
+            {!isLoading && archived.map((p) => (
               <tr key={p.id} className="border-b border-[var(--border-subtle)] last:border-0 hover:bg-[var(--bg-secondary)] transition-colors">
                 <td className="px-4 py-3">
                   <p className="text-xs font-medium text-[var(--text-primary)]">{p.title}</p>
@@ -46,6 +48,15 @@ export default function ProposalsPage() {
             ))}
           </tbody>
         </table>
+
+        {isError && <ErrorState title="Could not load the archive" error={error} onRetry={() => refetch()} />}
+
+        {!isLoading && !isError && archived.length === 0 && (
+          <EmptyState
+            title="Nothing archived yet"
+            message="Proposals show up here once they've been marked submitted."
+          />
+        )}
       </Card>
     </div>
   )

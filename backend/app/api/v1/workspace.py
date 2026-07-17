@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.core import cache
-from app.core.deps import get_current_user_id
+from app.core.deps import get_current_user_id, require_writer
 from app.models.contract import (
     GenerateSectionRequest,
     ProposalSection,
@@ -47,7 +47,7 @@ def list_requirements(rfp_id: UUID, user_id: UUID = Depends(get_current_user_id)
     return result
 
 
-@router.patch("/requirements/{requirement_id}", response_model=Requirement)
+@router.patch("/requirements/{requirement_id}", response_model=Requirement, dependencies=[Depends(require_writer)])
 def update_requirement(
     requirement_id: UUID,
     patch: RequirementUpdate,
@@ -61,7 +61,7 @@ def update_requirement(
     return result
 
 
-@router.delete("/requirements/{requirement_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/requirements/{requirement_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_writer)])
 def delete_requirement(
     requirement_id: UUID, user_id: UUID = Depends(get_current_user_id)
 ):
@@ -94,6 +94,7 @@ def list_sections(rfp_id: UUID, user_id: UUID = Depends(get_current_user_id)):
     "/proposals/{rfp_id}/sections",
     response_model=ProposalSection,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_writer)],
 )
 def create_section(
     rfp_id: UUID, payload: SectionCreate, user_id: UUID = Depends(get_current_user_id)
@@ -108,7 +109,7 @@ def get_section(section_id: UUID, user_id: UUID = Depends(get_current_user_id)):
     return _guard(ws.get_section, section_id, user_id)
 
 
-@router.patch("/sections/{section_id}", response_model=ProposalSection)
+@router.patch("/sections/{section_id}", response_model=ProposalSection, dependencies=[Depends(require_writer)])
 def update_section(
     section_id: UUID, patch: SectionUpdate, user_id: UUID = Depends(get_current_user_id)
 ):
@@ -117,14 +118,14 @@ def update_section(
     return result
 
 
-@router.post("/sections/{section_id}/approve", response_model=ProposalSection)
+@router.post("/sections/{section_id}/approve", response_model=ProposalSection, dependencies=[Depends(require_writer)])
 def approve_section(section_id: UUID, user_id: UUID = Depends(get_current_user_id)):
     result = _guard(ws.update_section, section_id, user_id, None, "approved")
     _invalidate_sections(user_id, result)
     return result
 
 
-@router.post("/sections/{section_id}/regenerate", response_model=ProposalSection)
+@router.post("/sections/{section_id}/regenerate", response_model=ProposalSection, dependencies=[Depends(require_writer)])
 def regenerate_section(section_id: UUID, user_id: UUID = Depends(get_current_user_id)):
     """Re-runs the RAG draft writer for an existing section."""
     _guard(ws.get_section, section_id, user_id)  # ownership check
@@ -139,6 +140,7 @@ def regenerate_section(section_id: UUID, user_id: UUID = Depends(get_current_use
     "/proposals/{rfp_id}/sections/generate",
     response_model=ProposalSection,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_writer)],
 )
 def generate_section(
     rfp_id: UUID,

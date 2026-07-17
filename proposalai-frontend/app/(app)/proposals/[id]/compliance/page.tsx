@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { StatusDot } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { ErrorState } from '@/components/ui/state'
 import { useRequirements, useUpdateRequirement, useDeleteRequirement } from '@/lib/hooks'
 import { cn } from '@/lib/utils/cn'
 import type { ComplianceStatus } from '@/types'
@@ -36,8 +37,8 @@ export default function CompliancePage({ params }: { params: Promise<{ id: strin
   const [filter, setFilter] = useState<ComplianceStatus | 'all'>('all')
   const [search, setSearch] = useState('')
 
-  // Real extracted requirements from Sprint 2 ingestion (mock as placeholder).
-  const { data: requirements = [], isLoading } = useRequirements(id)
+  // Requirements extracted by the Sprint 2 ingestion pipeline.
+  const { data: requirements = [], isLoading, isError, error, refetch } = useRequirements(id)
   const updateReq = useUpdateRequirement(id)
   const deleteReq = useDeleteRequirement(id)
   const [sortKey, setSortKey] = useState<SortKey>('number')
@@ -153,8 +154,14 @@ export default function CompliancePage({ params }: { params: Promise<{ id: strin
                 ))}
               </tr>
             ))}
-            {!isLoading && sorted.length === 0 && (
-              <tr><td colSpan={7} className="px-3 py-8 text-center text-[var(--text-tertiary)]">No requirements match.</td></tr>
+            {!isLoading && !isError && sorted.length === 0 && (
+              <tr>
+                <td colSpan={7} className="px-3 py-8 text-center text-[var(--text-tertiary)]">
+                  {requirements.length === 0
+                    ? 'No requirements extracted for this document yet.'
+                    : 'No requirements match the current filter.'}
+                </td>
+              </tr>
             )}
             {!isLoading && sorted.map((req) => (
               <tr key={req.id} className="border-b border-[var(--border-subtle)] last:border-0 hover:bg-[var(--bg-secondary)] transition-colors">
@@ -204,6 +211,10 @@ export default function CompliancePage({ params }: { params: Promise<{ id: strin
             ))}
           </tbody>
         </table>
+
+        {isError && (
+          <ErrorState title="Could not load the compliance matrix" error={error} onRetry={() => refetch()} />
+        )}
       </Card>
 
       {/* Status bar */}

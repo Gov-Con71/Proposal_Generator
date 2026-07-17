@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from app.core.config import settings
-from app.core.deps import get_current_user_id
+from app.core.deps import get_current_user_id, require_writer
 from app.models.contract import CamelModel
 from app.services import document_service as docs
 from app.services.s3_storage import S3Storage
@@ -69,6 +69,7 @@ def _spooled_size(upload: UploadFile) -> int:
     response_model=DocumentUploadResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Upload an RFP document, store it in S3, and queue ingestion",
+    dependencies=[Depends(require_writer)],
 )
 async def upload_document(
     file: UploadFile = File(..., description="RFP file (PDF, DOCX, or TXT)."),
@@ -147,6 +148,7 @@ def get_status(
     "/{rfp_id}/reanalyze",
     response_model=DocumentStatusResponse,
     summary="Re-run the ingestion pipeline for a document",
+    dependencies=[Depends(require_writer)],
 )
 def reanalyze(
     rfp_id: UUID, uploaded_by: UUID = Depends(get_current_user_id)
@@ -167,6 +169,7 @@ def reanalyze(
     response_model=DocumentStatusResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Generate a full proposal draft with the AI writer agent (async)",
+    dependencies=[Depends(require_writer)],
 )
 def draft_proposal(
     rfp_id: UUID, uploaded_by: UUID = Depends(get_current_user_id)

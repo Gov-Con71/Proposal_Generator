@@ -1,18 +1,19 @@
 'use client'
 import Link from 'next/link'
-import { ExternalLink, Filter, Download, Sparkles } from 'lucide-react'
+import { ExternalLink, Filter, Download, FilePlus2 } from 'lucide-react'
 import { useState } from 'react'
 import { Card } from '@/components/ui/card'
-import { Badge, ProposalStatusBadge } from '@/components/ui/badge'
+import { ProposalStatusBadge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { ProgressBar } from '@/components/ui/card'
+import { ProgressBar, Skeleton } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { EmptyState, ErrorState, TableSkeleton } from '@/components/ui/state'
 import { useProposals } from '@/lib/hooks'
-import { formatDate, formatCurrency } from '@/lib/utils/format'
+import { formatDate } from '@/lib/utils/format'
 
 export default function DashboardPage() {
   const [search, setSearch] = useState('')
-  const { data: proposals = [] } = useProposals()
+  const { data: proposals = [], isLoading, isError, error, refetch } = useProposals()
 
   const filtered = proposals.filter(
     (p) =>
@@ -38,18 +39,19 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Metric cards */}
+      {/* Metric cards — every value is derived from the loaded proposals. */}
       <div className="grid grid-cols-4 gap-3 mb-5">
         {[
-          { label: 'TOTAL PROPOSALS', value: total,    sub: '+2 from last month',  color: '' },
-          { label: 'IN PROGRESS',     value: inProgress, sub: undefined,           color: 'text-primary-600' },
-          { label: 'SUBMITTED',       value: submitted,  sub: '80% Success Rate',  color: 'text-success-600' },
-          { label: 'AVG COMPLIANCE %',value: `${avgCompliance}%`, sub: undefined,  color: 'text-warning-400' },
+          { label: 'TOTAL PROPOSALS', value: total,               color: '' },
+          { label: 'IN PROGRESS',     value: inProgress,          color: 'text-primary-600' },
+          { label: 'SUBMITTED',       value: submitted,           color: 'text-success-600' },
+          { label: 'AVG COMPLIANCE %',value: `${avgCompliance}%`, color: 'text-warning-400' },
         ].map((m) => (
           <Card key={m.label} className="p-4">
             <p className="text-[10px] font-medium text-[var(--text-tertiary)] tracking-wider uppercase mb-2">{m.label}</p>
-            <p className={`text-2xl font-medium ${m.color || 'text-[var(--text-primary)]'}`}>{m.value}</p>
-            {m.sub && <p className="text-xs text-[var(--text-secondary)] mt-1">{m.sub}</p>}
+            {isLoading
+              ? <Skeleton height={28} width={48} />
+              : <p className={`text-2xl font-medium ${m.color || 'text-[var(--text-primary)]'}`}>{m.value}</p>}
           </Card>
         ))}
       </div>
@@ -82,7 +84,8 @@ export default function DashboardPage() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((p) => (
+            {isLoading && <TableSkeleton cols={6} />}
+            {!isLoading && filtered.map((p) => (
               <tr key={p.id} className="border-b border-[var(--border-subtle)] hover:bg-[var(--bg-secondary)] transition-colors">
                 <td className="px-4 py-3">
                   <Link href={`/proposals/${p.id}/workspace`} className="text-primary-600 hover:text-primary-800 font-medium text-xs transition-colors">
@@ -109,23 +112,29 @@ export default function DashboardPage() {
             ))}
           </tbody>
         </table>
-      </Card>
 
-      {/* AI insight banner */}
-      <div className="flex items-center gap-3 px-4 py-3 bg-primary-800 rounded-xl text-white">
-        <div className="w-8 h-8 rounded-full bg-primary-600 flex items-center justify-center shrink-0">
-          <Sparkles className="w-4 h-4" />
-        </div>
-        <div className="flex-1">
-          <p className="text-xs font-medium">AI Compliance Insight</p>
-          <p className="text-xs text-primary-100 mt-0.5">
-            Solicitation W52P1J-26-R-0042 is missing key security clearance certifications in Section C.
-          </p>
-        </div>
-        <Button variant="default" size="sm" className="bg-white text-primary-800 border-white hover:bg-primary-50 shrink-0">
-          Fix Documentation
-        </Button>
-      </div>
+        {isError && <ErrorState title="Could not load proposals" error={error} onRetry={() => refetch()} />}
+
+        {!isLoading && !isError && proposals.length === 0 && (
+          <EmptyState
+            title="No proposals yet"
+            message="Upload an RFP and ProposalAI will extract its requirements and start a compliance matrix."
+            icon={<FilePlus2 className="w-5 h-5 text-[var(--text-tertiary)]" />}
+            action={
+              <Link href="/proposals/new">
+                <Button variant="primary" size="sm">Upload an RFP</Button>
+              </Link>
+            }
+          />
+        )}
+
+        {!isLoading && !isError && proposals.length > 0 && filtered.length === 0 && (
+          <EmptyState
+            title="No matching proposals"
+            message={`Nothing matches "${search}". Try a different solicitation number, title, or agency.`}
+          />
+        )}
+      </Card>
     </div>
   )
 }

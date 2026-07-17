@@ -1,8 +1,7 @@
 """S3 object storage service (Story 2.2).
 
 Streaming upload / download used by the document ingestion pipeline. Toggles
-between LocalStack (local dev) and real AWS via `settings.use_localstack`,
-matching the convention established in `scripts/s3_artifact_store.py`.
+between LocalStack (local dev) and real AWS via `settings.use_localstack`.
 """
 
 import logging

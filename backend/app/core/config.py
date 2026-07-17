@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(
         default=60 * 24, validation_alias="ACCESS_TOKEN_EXPIRE_MINUTES"
     )
+    # Refresh tokens outlive access tokens; rotation on every use bounds the
+    # damage of a leaked one (see refresh_token_service).
+    refresh_token_expire_days: int = Field(
+        default=30, validation_alias="REFRESH_TOKEN_EXPIRE_DAYS"
+    )
 
     # --- Celery / Redis worker queue (Story 2.5) ---
     celery_broker_url: str = Field(

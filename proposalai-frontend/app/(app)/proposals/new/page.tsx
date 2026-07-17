@@ -35,13 +35,16 @@ export default function UploadPage() {
   const [uploading, setUploading] = useState(false)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  // NOTE: this metadata is not submitted yet — POST /documents/upload takes the
+  // file only, and the title/agency/solicitation are parsed from the document
+  // during ingestion. Wiring these through needs a backend contract change.
   const [form, setForm] = useState({
-    title: 'Enterprise Cloud Migration & Support Services',
-    agency: 'Department of Defense (DoD)',
-    solicitationNumber: 'FA823-24-R-0012',
-    deadline: '2026-11-14',
+    title: '',
+    agency: '',
+    solicitationNumber: '',
+    deadline: '',
     contractType: 'ffp',
-    naicsCode: '541512 - Computer Systems Design Services',
+    naicsCode: '',
   })
 
   const onDrop = useCallback((accepted: File[]) => {
@@ -76,8 +79,7 @@ export default function UploadPage() {
   // Streams the file to the backend, then advances to the processing view.
   async function handleContinue() {
     if (!file) {
-      // No real file selected (demo state) — proceed without an upload.
-      router.push('/proposals/new/analyze')
+      setError('Select an RFP document to upload before continuing.')
       return
     }
     setError(null)
@@ -85,6 +87,13 @@ export default function UploadPage() {
     setProgress(0)
     try {
       const res = await documentsApi.upload(file, setProgress)
+      // Guard the handoff: without an id the next step would stream against
+      // /proposals/undefined/… and 422 on every poll.
+      if (!res.rfpId) {
+        setError('The server accepted the upload but returned no document id. Please retry.')
+        setUploading(false)
+        return
+      }
       router.push(`/proposals/new/process?rfp=${res.rfpId}`)
     } catch (e) {
       const err = e as { response?: { status?: number; data?: { detail?: string } } }

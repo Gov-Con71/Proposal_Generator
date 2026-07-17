@@ -59,17 +59,17 @@ class LoginRequest(CamelModel):
     password: str
 
 
-class RequestAccessRequest(CamelModel):
-    email: str
-    name: str
-    company: str
-
-
 class RegisterRequest(CamelModel):
     email: str
     password: str
     first_name: str
     last_name: str = ""
+    # Optional: signing up under an existing organisation name joins it.
+    company: str = ""
+
+
+class RefreshRequest(CamelModel):
+    refresh_token: str
 
 
 class User(CamelModel):
@@ -96,16 +96,6 @@ class MessageResponse(CamelModel):
 # ---------------------------------------------------------------------------
 # Documents / Upload
 # ---------------------------------------------------------------------------
-
-class UploadResponse(CamelModel):
-    document_id: str
-    proposal_id: str
-    file_name: str
-    size_bytes: int
-    s3_key: str
-    processing_status: ProcessingStatus
-    uploaded_at: str
-
 
 class ReanalyzeResponse(CamelModel):
     document_id: str

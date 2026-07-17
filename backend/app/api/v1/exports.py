@@ -15,7 +15,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 
-from app.core.deps import get_current_user_id
+from app.core.deps import get_current_user_id, require_writer
 from app.models.contract import ExportCreateRequest, ExportJob
 from app.services import export_service, proposals_service
 from app.worker.celery_app import celery_app
@@ -23,7 +23,7 @@ from app.worker.celery_app import celery_app
 router = APIRouter(prefix="/exports", tags=["Exports"])
 
 
-@router.post("", response_model=ExportJob, status_code=status.HTTP_202_ACCEPTED)
+@router.post("", response_model=ExportJob, status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_writer)])
 def create_export(
     payload: ExportCreateRequest, user_id: UUID = Depends(get_current_user_id)
 ) -> ExportJob:
