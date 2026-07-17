@@ -7,10 +7,12 @@ import { captureException } from '@/lib/observability'
 // Global error boundary for the authenticated app segment (Story 4.5).
 export default function AppError({
   error,
-  reset,
+  unstable_retry,
 }: {
   error: Error & { digest?: string }
-  reset: () => void
+  // Next 16 renamed the reset prop; unlike `reset` it re-fetches the segment
+  // rather than only clearing the boundary's error state.
+  unstable_retry: () => void
 }) {
   useEffect(() => {
     console.error('App segment error:', error)
@@ -27,7 +29,7 @@ export default function AppError({
         An unexpected error occurred while loading this view. You can retry, or head back to the dashboard.
       </p>
       <div className="flex items-center gap-2">
-        <Button variant="primary" size="sm" icon={<RefreshCw className="w-3.5 h-3.5" />} onClick={() => reset()}>
+        <Button variant="primary" size="sm" icon={<RefreshCw className="w-3.5 h-3.5" />} onClick={() => unstable_retry()}>
           Try again
         </Button>
         <Button variant="default" size="sm" onClick={() => (window.location.href = '/dashboard')}>

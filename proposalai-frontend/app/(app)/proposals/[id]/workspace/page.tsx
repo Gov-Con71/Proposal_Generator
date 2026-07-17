@@ -3,7 +3,8 @@ import { useMemo, useState, use } from 'react'
 import { RefreshCw, Loader2, Bold, Italic, List, Link2, ChevronDown, ChevronRight } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { StatusDot } from '@/components/ui/card'
-import { useRequirements, useGenerateSection, useSaveSection } from '@/lib/hooks'
+import { ErrorState } from '@/components/ui/state'
+import { useRequirements, useGenerateSection, useSaveSection, isValidId } from '@/lib/hooks'
 import { cn } from '@/lib/utils/cn'
 import type { Requirement, ComplianceStatus } from '@/types'
 
@@ -13,7 +14,7 @@ function categoryLabel(cat: string) {
 
 export default function WorkspacePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
-  const { data: requirements = [] } = useRequirements(id)
+  const { data: requirements = [], isLoading, isError, error, refetch } = useRequirements(id)
   const generate = useGenerateSection(id)
   const saveSection = useSaveSection(id)
 
@@ -52,6 +53,27 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
 
   const wordCount = content.trim().split(/\s+/).filter(Boolean).length
 
+  // A malformed route param (e.g. /proposals/undefined/workspace) is a broken
+  // link, not an empty workspace — don't dress it up as "no requirements yet".
+  if (!isValidId(id)) {
+    return (
+      <div className="page-padding">
+        <ErrorState
+          title="This workspace link is invalid"
+          message="The proposal id is missing from the URL. Open the proposal from the dashboard."
+        />
+      </div>
+    )
+  }
+
+  if (isError) {
+    return (
+      <div className="page-padding">
+        <ErrorState title="Could not load this workspace" error={error} onRetry={() => refetch()} />
+      </div>
+    )
+  }
+
   return (
     <div className="flex" style={{ height: 'calc(100vh - 88px)' }}>
       {/* Left panel — requirements grouped by category */}
@@ -61,7 +83,10 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
           <span className="text-[10px] text-neutral-400">{requirements.length}</span>
         </div>
         <div className="flex-1 overflow-y-auto">
-          {groups.length === 0 && (
+          {isLoading && (
+            <p className="px-4 py-6 text-xs text-neutral-400">Loading requirements…</p>
+          )}
+          {!isLoading && groups.length === 0 && (
             <p className="px-4 py-6 text-xs text-neutral-400">No requirements yet — upload an RFP to extract them.</p>
           )}
           {groups.map(([category, reqs]) => {

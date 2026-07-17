@@ -107,6 +107,25 @@ def seeded_user():
 
 
 @pytest.fixture
+def other_user():
+    """A second real tenant, for cross-tenant isolation checks."""
+    user_id = str(uuid.uuid4())
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO users (user_id, email, password_hash, first_name, last_name) "
+        "VALUES (%s, %s, 'h', 'Other', 'Tenant');",
+        (user_id, f"other_{uuid.uuid4().hex[:6]}@example.com"),
+    )
+    conn.commit()
+    yield user_id
+    cur.execute("DELETE FROM users WHERE user_id = %s;", (user_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+@pytest.fixture
 def seeded_proposal(seeded_user):
     """A proposal linked to an owned RFP with one section + one requirement."""
     conn = _conn()
@@ -209,15 +228,32 @@ def test_export_of_unlinked_proposal_still_renders(test_client, seeded_user, cap
 
 
 @mock_aws
-def test_export_rejects_unknown_or_foreign_proposal(test_client, seeded_proposal, capture_enqueue, monkeypatch):
+def test_export_rejects_unknown_or_foreign_proposal(
+    test_client, seeded_proposal, other_user, capture_enqueue, monkeypatch
+):
     monkeypatch.setattr(settings, "use_localstack", False)
     auth = _auth(seeded_proposal["user_id"])
 
-    # unknown proposal id, malformed id, and another tenant's proposal -> 404
+    # unknown proposal id and malformed id -> 404
     assert test_client.post("/exports", json={"proposalId": str(uuid.uuid4()), "format": "pdf"}, headers=auth).status_code == 404
     assert test_client.post("/exports", json={"proposalId": "not-a-uuid", "format": "pdf"}, headers=auth).status_code == 404
-    other = _auth(str(uuid.uuid4()))
-    assert test_client.post("/exports", json={"proposalId": seeded_proposal["proposal_id"], "format": "pdf"}, headers=other).status_code == 404
+
+    # A real second tenant gets 404, not 403 — existence must not leak.
+    other = _auth(other_user)
+    assert test_client.post(
+        "/exports", json={"proposalId": seeded_proposal["proposal_id"], "format": "pdf"}, headers=other
+    ).status_code == 404
+
+
+@mock_aws
+def test_export_rejects_token_for_deleted_user(test_client, seeded_proposal, monkeypatch):
+    """A well-formed token whose subject no longer exists is unauthenticated —
+    it must not reach the tenant check (Sprint 7: roles load from the DB)."""
+    monkeypatch.setattr(settings, "use_localstack", False)
+    ghost = _auth(str(uuid.uuid4()))  # never inserted
+    assert test_client.post(
+        "/exports", json={"proposalId": seeded_proposal["proposal_id"], "format": "pdf"}, headers=ghost
+    ).status_code == 401
 
 
 def _boom(*_args, **_kwargs):

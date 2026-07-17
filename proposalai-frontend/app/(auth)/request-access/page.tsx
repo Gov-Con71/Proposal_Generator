@@ -33,6 +33,7 @@ export default function RequestAccessPage() {
         password,
         firstName,
         lastName: rest.join(' '),
+        company: org.trim() || undefined,
       })
       setSession(session)
       // Cookie lets the route-guard (proxy.ts) see the session server-side.

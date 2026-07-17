@@ -7,6 +7,8 @@ export interface RegisterPayload {
   password: string
   firstName: string
   lastName: string
+  /** Organisation name. Signing up under an existing name joins that company. */
+  company?: string
 }
 
 export const authApi = {
@@ -18,7 +20,15 @@ export const authApi = {
 
   me: () => apiClient.get<User>('/auth/me').then((r) => r.data),
 
-  logout: () => apiClient.post('/auth/logout').then((r) => r.data),
+  // Rotating refresh tokens: the server consumes the old one and returns a new
+  // session. Replaying a consumed token revokes every session for that user.
+  refresh: (refreshToken: string) =>
+    apiClient.post<Session>('/auth/refresh', { refreshToken }).then((r) => r.data),
+
+  // Sending the refresh token lets the server actually revoke it; without it,
+  // logout would only clear client state and leave the session rotatable.
+  logout: (refreshToken?: string) =>
+    apiClient.post('/auth/logout', refreshToken ? { refreshToken } : {}).then((r) => r.data),
 }
 
 // ─── proposals.ts ────────────────────────────────────────────────────────────

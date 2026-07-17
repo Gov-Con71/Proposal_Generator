@@ -10,7 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
-from app.core.deps import get_current_user_id
+from app.core.deps import get_current_user_id, require_writer
 from app.models.contract import (
     IntegrityItem,
     Proposal,
@@ -40,7 +40,7 @@ def get_proposal(proposal_id: UUID, user_id: UUID = Depends(get_current_user_id)
         raise _not_found(exc) from exc
 
 
-@router.post("", response_model=Proposal, status_code=status.HTTP_201_CREATED, summary="Create a proposal")
+@router.post("", response_model=Proposal, status_code=status.HTTP_201_CREATED, summary="Create a proposal", dependencies=[Depends(require_writer)])
 def create_proposal(
     payload: ProposalCreate, user_id: UUID = Depends(get_current_user_id)
 ) -> Proposal:
@@ -50,7 +50,7 @@ def create_proposal(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
-@router.patch("/{proposal_id}", response_model=Proposal, summary="Update a proposal")
+@router.patch("/{proposal_id}", response_model=Proposal, summary="Update a proposal", dependencies=[Depends(require_writer)])
 def update_proposal(
     proposal_id: UUID, payload: ProposalUpdate, user_id: UUID = Depends(get_current_user_id)
 ) -> Proposal:
@@ -62,7 +62,7 @@ def update_proposal(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
-@router.delete("/{proposal_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a proposal")
+@router.delete("/{proposal_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a proposal", dependencies=[Depends(require_writer)])
 def delete_proposal(proposal_id: UUID, user_id: UUID = Depends(get_current_user_id)) -> Response:
     try:
         proposals.delete_proposal(proposal_id, user_id)

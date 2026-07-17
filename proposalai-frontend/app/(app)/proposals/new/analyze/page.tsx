@@ -1,11 +1,12 @@
 'use client'
-import { useState } from 'react'
+import { use, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { ArrowLeft, Plus, X, Trash2 } from 'lucide-react'
+import { ArrowLeft, Plus, X, Trash2, Loader2 } from 'lucide-react'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Input, Textarea, Select } from '@/components/ui/input'
 import { Card, StepIndicator } from '@/components/ui/card'
+import { ErrorState } from '@/components/ui/state'
 import { useProfile } from '@/lib/hooks'
 import type { CompanyProfile } from '@/types'
 import type { Step } from '@/components/ui/card'
@@ -17,14 +18,34 @@ const STEPS: Step[] = [
   { label: 'Review',     status: 'pending' },
 ]
 
-export default function AnalyzePage() {
-  const { data: profile } = useProfile()
-  if (!profile) return null
-  // Re-mount when real data replaces the placeholder so uncontrolled inputs re-init.
-  return <AnalyzeForm key={profile.id} profile={profile} />
+export default function AnalyzePage({ searchParams }: { searchParams: Promise<{ rfp?: string }> }) {
+  const { rfp } = use(searchParams)
+  const { data: profile, isLoading, isError, error, refetch } = useProfile()
+
+  if (isLoading) {
+    return (
+      <div className="page-padding flex items-center justify-center min-h-[60vh]">
+        <Loader2 className="w-5 h-5 text-primary-600 animate-spin" />
+      </div>
+    )
+  }
+  if (isError || !profile) {
+    return (
+      <div className="page-padding">
+        <ErrorState
+          title="Could not load your company profile"
+          message="The analyze step pre-fills from your company profile. Retry, or fill it in from the Profile page."
+          error={error}
+          onRetry={() => refetch()}
+        />
+      </div>
+    )
+  }
+  // Re-mount once the profile arrives so uncontrolled inputs re-init.
+  return <AnalyzeForm key={profile.id} profile={profile} rfp={rfp} />
 }
 
-function AnalyzeForm({ profile }: { profile: CompanyProfile }) {
+function AnalyzeForm({ profile, rfp }: { profile: CompanyProfile; rfp?: string }) {
   const router = useRouter()
   const [certs, setCerts] = useState(profile.certifications)
   const [certInput, setCertInput] = useState('')
@@ -171,7 +192,12 @@ function AnalyzeForm({ profile }: { profile: CompanyProfile }) {
         <Button variant="default" asChild><Link href="/proposals/new">Back</Link></Button>
         <div className="flex gap-2">
           <Button variant="default">Save Draft</Button>
-          <Button variant="primary" onClick={() => router.push('/proposals/new/process')}>
+          {/* Carry the uploaded document id forward — the process step streams
+              against it, and dropping it strands the flow with no RFP. */}
+          <Button
+            variant="primary"
+            onClick={() => router.push(rfp ? `/proposals/new/process?rfp=${rfp}` : '/proposals/new/process')}
+          >
             Generate Proposal
           </Button>
         </div>

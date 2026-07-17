@@ -48,14 +48,24 @@ jobs:
       - name: Apply database schema (init order)
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
-          psql "$DATABASE_URL" -f backend/init_scripts/init_schema.sql
-          psql "$DATABASE_URL" -f backend/init_scripts/rag_schema.sql
-          psql "$DATABASE_URL" -f backend/init_scripts/tuning.sql
+          # Apply every migration in filename order — the same order Postgres
+          # uses for docker-entrypoint-initdb.d, so CI matches a fresh container.
+          # Globbing (rather than a hand-written list) means a new sprint's
+          # migration can't be silently missed here.
+          for f in backend/init_scripts/*.sql; do
+            echo "--- applying $f"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
+          done
 
       - name: Run tests
         working-directory: backend
         env:
           PYTHONPATH: .
+          # The frontend types sit outside the backend container's mount, so the
+          # contract-drift checks skip there. CI has the whole repo, so make a
+          # skip a hard failure — a guard that silently no-ops reports green
+          # while checking nothing.
+          CONTRACT_STRICT: "1"
         run: pytest -q
 
   frontend:

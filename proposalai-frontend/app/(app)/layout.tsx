@@ -9,6 +9,7 @@ import {
 import { cn } from '@/lib/utils/cn'
 import { Button } from '@/components/ui/button'
 import { useAuthStore } from '@/lib/stores/auth-store'
+import { authApi } from '@/lib/api'
 
 const NAV = [
   {
@@ -29,12 +30,28 @@ const NAV = [
   },
 ]
 
+/** "Ada Lovelace" → "AL". Falls back to the email's first letter. */
+function initialsOf(name?: string, email?: string) {
+  const parts = (name ?? '').trim().split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
+  return (email ?? '?').slice(0, 1).toUpperCase()
+}
+
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
   const clearSession = useAuthStore((s) => s.clearSession)
+  const user = useAuthStore((s) => s.user)
 
-  function handleLogout() {
+  async function handleLogout() {
+    // Revoke server-side first so the refresh token can't be rotated again;
+    // clearing local state alone would leave the session alive for 30 days.
+    try {
+      await authApi.logout(useAuthStore.getState().refreshToken ?? undefined)
+    } catch {
+      // A failed revoke must not strand the user in a session they've left.
+    }
     clearSession()
     // Expire the route-guard cookie set at login.
     document.cookie = 'proposalai-token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'
@@ -81,8 +98,11 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           <Button variant="primary" size="sm" icon={<Plus className="w-3.5 h-3.5" />}>
             <Link href="/proposals/new" className="no-underline">New proposal</Link>
           </Button>
-          <div className="w-7 h-7 rounded-full bg-primary-100 flex items-center justify-center text-[10px] font-medium text-primary-800 cursor-pointer">
-            JS
+          <div
+            title={user?.email}
+            className="w-7 h-7 rounded-full bg-primary-100 flex items-center justify-center text-[10px] font-medium text-primary-800 cursor-pointer"
+          >
+            {initialsOf(user?.name, user?.email)}
           </div>
         </div>
       </header>

@@ -6,6 +6,7 @@ import type { User, Session } from '@/types'
 interface AuthState {
   user: User | null
   accessToken: string | null
+  refreshToken: string | null
   isAuthenticated: boolean
   setSession: (session: Session) => void
   clearSession: () => void
@@ -16,12 +17,14 @@ export const useAuthStore = create<AuthState>()(
     (set) => ({
       user: null,
       accessToken: null,
+      refreshToken: null,
       isAuthenticated: false,
 
       setSession: (session: Session) =>
         set({
           user: session.user,
           accessToken: session.accessToken,
+          refreshToken: session.refreshToken,
           isAuthenticated: true,
         }),
 
@@ -29,6 +32,7 @@ export const useAuthStore = create<AuthState>()(
         set({
           user: null,
           accessToken: null,
+          refreshToken: null,
           isAuthenticated: false,
         }),
     }),
@@ -37,6 +41,7 @@ export const useAuthStore = create<AuthState>()(
       partialize: (state) => ({
         user: state.user,
         accessToken: state.accessToken,
+        refreshToken: state.refreshToken,
         isAuthenticated: state.isAuthenticated,
       }),
     }

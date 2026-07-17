@@ -83,7 +83,9 @@ services:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-004}
       # Override in production — the app default is intentionally insecure.
       - JWT_SECRET=${JWT_SECRET:-dev-insecure-change-me}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-30}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - SENTRY_DSN=${SENTRY_DSN:-}
     depends_on:
@@ -132,15 +134,18 @@ services:
     build:
       context: ./proposalai-frontend
       dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* is inlined into the client bundle at build time, so it
+        # has to be passed here, not as a runtime `environment` entry. The
+        # browser calls the backend on the host port, so localhost:8000 is
+        # correct for a local run; point this at the real API to deploy.
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     container_name: proposalai_frontend
     ports:
       - "3000:3000"
     environment:
       - NODE_ENV=production
       - NEXT_TELEMETRY_DISABLED=1
-      # NEXT_PUBLIC_* is inlined at build time; the browser calls the backend
-      # on the host port, so localhost:8000 is correct for a local run.
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
       - NEXT_PUBLIC_APP_NAME=ProposalAI
     depends_on:
       - backend

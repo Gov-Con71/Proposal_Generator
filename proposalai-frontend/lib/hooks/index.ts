@@ -1,64 +1,72 @@
 // ─── use-proposals.ts ─────────────────────────────────────────────────────────
 import { useQuery } from '@tanstack/react-query'
 import { proposalsApi } from '@/lib/api'
-import { MOCK_PROPOSALS } from '@/lib/constants/mock-data'
+
+// A valid id is required before any of the per-proposal queries may run. Next's
+// dynamic params arrive as strings, so a missing one shows up as "undefined"
+// rather than a falsy value — which would otherwise be requested verbatim.
+export function isValidId(id: string | undefined | null): id is string {
+  return !!id && id !== 'undefined' && id !== 'null'
+}
 
 export function useProposals() {
   return useQuery({
     queryKey: ['proposals'],
     queryFn: proposalsApi.list,
-    placeholderData: MOCK_PROPOSALS,
   })
 }
 
 // ─── use-proposal.ts ──────────────────────────────────────────────────────────
-import { MOCK_PROPOSAL } from '@/lib/constants/mock-data'
-
 export function useProposal(id: string) {
   return useQuery({
     queryKey: ['proposals', id],
     queryFn: () => proposalsApi.get(id),
-    placeholderData: MOCK_PROPOSAL,
-    enabled: !!id,
+    enabled: isValidId(id),
   })
 }
 
 // ─── use-requirements.ts ──────────────────────────────────────────────────────
 import { requirementsApi } from '@/lib/api'
-import { MOCK_REQUIREMENTS } from '@/lib/constants/mock-data'
 
 export function useRequirements(proposalId: string) {
   return useQuery({
     queryKey: ['requirements', proposalId],
     queryFn: () => requirementsApi.list(proposalId),
-    placeholderData: MOCK_REQUIREMENTS,
-    enabled: !!proposalId,
+    enabled: isValidId(proposalId),
   })
 }
 
 // ─── use-sections.ts ──────────────────────────────────────────────────────────
 import { sectionsApi } from '@/lib/api'
-import { MOCK_SECTIONS } from '@/lib/constants/mock-data'
 
 export function useSections(proposalId: string) {
   return useQuery({
     queryKey: ['sections', proposalId],
     queryFn: () => sectionsApi.list(proposalId),
-    placeholderData: MOCK_SECTIONS,
-    enabled: !!proposalId,
+    enabled: isValidId(proposalId),
+  })
+}
+
+// ─── use-document-status.ts ───────────────────────────────────────────────────
+import { documentsApi } from '@/lib/api'
+
+/** Ingestion state for an uploaded RFP: file name, status, requirement count. */
+export function useDocumentStatus(rfpId: string) {
+  return useQuery({
+    queryKey: ['documents', rfpId],
+    queryFn: () => documentsApi.status(rfpId),
+    enabled: isValidId(rfpId),
   })
 }
 
 // ─── use-integrity.ts ─────────────────────────────────────────────────────────
 import { integrityApi } from '@/lib/api'
-import { MOCK_INTEGRITY_ITEMS } from '@/lib/constants/mock-data'
 
 export function useIntegrity(proposalId: string) {
   return useQuery({
     queryKey: ['integrity', proposalId],
     queryFn: () => integrityApi.list(proposalId),
-    placeholderData: MOCK_INTEGRITY_ITEMS,
-    enabled: !!proposalId,
+    enabled: isValidId(proposalId),
   })
 }
 
@@ -87,14 +95,12 @@ export function useCompliance(proposalId: string) {
 
 // ─── use-profile.ts ───────────────────────────────────────────────────────────
 import { profileApi } from '@/lib/api'
-import { MOCK_PROFILE } from '@/lib/constants/mock-data'
 import type { CompanyProfile } from '@/types'
 
 export function useProfile() {
   return useQuery({
     queryKey: ['profile'],
     queryFn: profileApi.get,
-    placeholderData: MOCK_PROFILE,
   })
 }
 
@@ -111,18 +117,32 @@ export function useSaveProfile() {
 // ─── use-processing.ts ────────────────────────────────────────────────────────
 import { useEffect, useRef } from 'react'
 import type { Pipeline } from '@/types'
-import { MOCK_PIPELINE } from '@/lib/constants/mock-data'
 import { useAuthStore } from '@/lib/stores/auth-store'
 
-export function useProcessing(
-  proposalId: string,
-  onComplete?: () => void
-) {
-  const [pipeline, setPipeline] = useState<Pipeline>(MOCK_PIPELINE)
+/** Nothing has streamed yet. Rendered as "connecting", never as progress. */
+const IDLE_PIPELINE: Pipeline = {
+  proposalId: '',
+  status: 'idle',
+  overallProgress: 0,
+  steps: [],
+  startedAt: '',
+}
+
+export function useProcessing(proposalId: string, onComplete?: () => void) {
+  const [pipeline, setPipeline] = useState<Pipeline>(IDLE_PIPELINE)
+  const [connectionError, setConnectionError] = useState(false)
   const esRef = useRef<EventSource | null>(null)
 
+  // Keep the latest callback without making it an effect dependency — otherwise
+  // an inline arrow from the caller would tear down the stream on every render.
+  const onCompleteRef = useRef(onComplete)
+  useEffect(() => { onCompleteRef.current = onComplete })
+
   useEffect(() => {
-    if (!proposalId) return
+    if (!isValidId(proposalId)) return
+
+    setPipeline(IDLE_PIPELINE)
+    setConnectionError(false)
 
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
     // EventSource can't set an Authorization header, so pass the JWT as a query
@@ -136,14 +156,21 @@ export function useProcessing(
       try {
         const data: Pipeline = JSON.parse(e.data)
         setPipeline(data)
+        setConnectionError(false)
         if (data.status === 'completed') {
           es.close()
-          onComplete?.()
+          onCompleteRef.current?.()
         }
-      } catch {}
+      } catch {
+        // A single malformed frame isn't fatal; keep the stream open.
+      }
     }
 
-    es.onerror = () => es.close()
+    // Surface the dropped stream instead of hanging on a stale progress bar.
+    es.onerror = () => {
+      setConnectionError(true)
+      es.close()
+    }
 
     return () => {
       es.close()
@@ -151,11 +178,11 @@ export function useProcessing(
     }
   }, [proposalId])
 
-  return pipeline
+  return { pipeline, connectionError }
 }
 
 // ─── use-upload.ts ────────────────────────────────────────────────────────────
-import { documentsApi } from '@/lib/api'
+// documentsApi is already imported above by use-document-status.
 
 export function useUpload() {
   const [uploading, setUploading] = useState(false)
