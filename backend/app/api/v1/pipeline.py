@@ -1,6 +1,6 @@
 """Ingestion-pipeline progress stream (Server-Sent Events).
 
-    GET /proposals/{rfp_id}/pipeline/stream  → text/event-stream of Pipeline JSON
+    GET /proposals/{proposal_id}/pipeline/stream  → text/event-stream of Pipeline JSON
 
 Reflects the *real* ingestion status of an uploaded RFP: it polls
 `rfp_documents.processing_status` (advanced by the Celery worker through
@@ -9,9 +9,15 @@ view the frontend's `useProcessing` hook renders, closing when a terminal
 snapshot (`completed`/`failed`) is sent.
 
 Auth note: the browser EventSource API cannot set an Authorization header, so
-this route takes an optional `?token=` query param instead of the bearer
-dependency. When a valid token is supplied, the stream is scoped to the owning
-tenant; without one it still streams status (the rfp_id acts as the capability).
+this route takes the access token as a `?token=` query param instead of the
+bearer dependency. The token is *required* and the stream is always scoped to
+the owning tenant — treating the rfp_id itself as a capability let any
+anonymous caller read another tenant's ingestion progress.
+
+Known limitation: a token in the query string lands in access logs, browser
+history, and Referer headers. Replacing it with a short-lived single-purpose
+stream ticket (or fetch + ReadableStream, which can set headers) is tracked
+separately in GAP_ANALYSIS.md §2.2.
 """
 
 import asyncio
@@ -19,12 +25,13 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import jwt
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from app.core.security import decode_token
 from app.models.contract import Pipeline, PipelineStep
 from app.services import document_service as docs
+from app.services import proposals_service
 
 router = APIRouter(tags=["Documents"])
 
@@ -67,8 +74,10 @@ def _read_state(rfp_id: str) -> tuple[str | None, int, str | None]:
     return document["processing_status"], docs.count_requirements(UUID(rfp_id)), str(document["uploaded_by"])
 
 
-def _snapshot(rfp_id: str, started_at: str, status: str, count: int) -> Pipeline:
-    completed_index, failed = _STATUS_MAP.get(status, (0, False))
+def _snapshot(proposal_id: str, started_at: str, doc_status: str, count: int) -> Pipeline:
+    """Builds the frame the client sees. `proposal_id` is what it addressed; the
+    status behind it was read from the linked document."""
+    completed_index, failed = _STATUS_MAP.get(doc_status, (0, False))
 
     steps: list[PipelineStep] = []
     for i, (sid, label, desc) in enumerate(_STEPS):
@@ -101,7 +110,7 @@ def _snapshot(rfp_id: str, started_at: str, status: str, count: int) -> Pipeline
         message = f"Running: {_STEPS[min(completed_index, len(_STEPS) - 1)][1]}"
 
     return Pipeline(
-        proposal_id=rfp_id,
+        proposal_id=proposal_id,
         status=run_status,
         overall_progress=round(100 * min(completed_index, len(_STEPS)) / len(_STEPS)),
         steps=steps,
@@ -111,26 +120,27 @@ def _snapshot(rfp_id: str, started_at: str, status: str, count: int) -> Pipeline
     )
 
 
-async def _event_stream(rfp_id: str, user_id: str | None):
+async def _event_stream(rfp_id: str, proposal_id: str, user_id: str):
+    """Reads progress by `rfp_id`; reports it against the `proposal_id` the
+    client addressed, so the frame echoes the id it asked about."""
     started_at = _now()
     last_payload: str | None = None
 
     for _ in range(_MAX_POLLS):
-        status, count, owner = await asyncio.to_thread(_read_state, rfp_id)
+        doc_status, count, owner = await asyncio.to_thread(_read_state, rfp_id)
 
-        if status is None:
+        # A document this tenant doesn't own is reported exactly like a missing
+        # one — the caller must not be able to tell the difference, or the
+        # stream becomes an existence oracle for other tenants' rfp_ids.
+        if doc_status is None or owner != user_id:
             pipe = Pipeline(
-                proposal_id=rfp_id, status="failed", overall_progress=0, steps=[],
+                proposal_id=proposal_id, status="failed", overall_progress=0, steps=[],
                 started_at=started_at, completed_at=_now(), status_message="Document not found.",
             )
             yield f"data: {pipe.model_dump_json(by_alias=True)}\n\n"
             return
 
-        # Scope to the owner when a token was supplied; never leak another tenant's progress.
-        if user_id is not None and owner is not None and owner != user_id:
-            return
-
-        pipe = _snapshot(rfp_id, started_at, status, count)
+        pipe = _snapshot(proposal_id, started_at, doc_status, count)
         payload = pipe.model_dump_json(by_alias=True)
         if payload != last_payload:  # only push on change (plus the terminal frame)
             yield f"data: {payload}\n\n"
@@ -141,17 +151,38 @@ async def _event_stream(rfp_id: str, user_id: str | None):
         await asyncio.sleep(_POLL_SECONDS)
 
 
-@router.get("/proposals/{rfp_id}/pipeline/stream")
-async def stream_pipeline(rfp_id: UUID, token: str | None = None) -> StreamingResponse:
-    user_id: str | None = None
-    if token:
-        try:
-            user_id = decode_token(token)
-        except jwt.PyJWTError:
-            user_id = None  # invalid token → fall back to unscoped status streaming
+@router.get("/proposals/{proposal_id}/pipeline/stream")
+async def stream_pipeline(proposal_id: UUID, token: str | None = None) -> StreamingResponse:
+    # A missing or bad token is a 401, exactly as on every sibling route. It
+    # previously fell back to unscoped streaming, which meant presenting no
+    # token granted *more* access than presenting another tenant's valid one.
+    if not token:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "A token query parameter is required for this stream.",
+        )
+    try:
+        user_id = decode_token(token)
+    except (jwt.PyJWTError, ValueError) as exc:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token.") from exc
+
+    # Resolve before streaming so an unknown proposal is a plain HTTP error the
+    # client can act on, rather than a 200 stream carrying a failure frame.
+    # Off-thread: rfp_for_proposal is a blocking DB call.
+    try:
+        rfp_id = await asyncio.to_thread(
+            proposals_service.rfp_for_proposal, proposal_id, UUID(user_id)
+        )
+    except proposals_service.NotFoundError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found.") from exc
+    except proposals_service.NoLinkedDocumentError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This proposal has no ingested RFP yet.",
+        ) from exc
 
     return StreamingResponse(
-        _event_stream(str(rfp_id), user_id),
+        _event_stream(str(rfp_id), str(proposal_id), user_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -16,8 +16,9 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from app.core.config import settings
 from app.core.deps import get_current_user_id, require_writer
-from app.models.contract import CamelModel
+from app.models.contract import CamelModel, ProposalCreate
 from app.services import document_service as docs
+from app.services import proposals_service as proposals
 from app.services.s3_storage import S3Storage
 from app.worker.celery_app import celery_app
 
@@ -29,6 +30,9 @@ ALLOWED_SUFFIXES = {".pdf", ".docx", ".txt"}
 
 
 class DocumentUploadResponse(CamelModel):
+    # The proposal created for this upload. It is the id the client navigates
+    # by — every /proposals/{id}/… route is keyed on it (GAP_ANALYSIS §1.2).
+    proposal_id: str
     rfp_id: str
     file_name: str
     size_bytes: int
@@ -115,10 +119,20 @@ async def upload_document(
             f"Unknown uploader '{uploaded_by}' — user does not exist.",
         ) from exc
 
+    # --- create the proposal this upload is for ---
+    # Uploading an RFP is how a proposal starts, so one is created here rather
+    # than leaving an orphan document the dashboard can never show. The title is
+    # a placeholder the user renames; ingestion fills in the rest.
+    proposal = proposals.create_proposal(
+        uploaded_by,
+        ProposalCreate(title=Path(safe_name).stem, document_id=str(created_id)),
+    )
+
     # --- hand off to the async worker queue (by name; worker owns the LLM stack) ---
     celery_app.send_task("ingest_document", args=[str(created_id)])
 
     return DocumentUploadResponse(
+        proposal_id=proposal.id,
         rfp_id=str(created_id),
         file_name=safe_name,
         size_bytes=size,

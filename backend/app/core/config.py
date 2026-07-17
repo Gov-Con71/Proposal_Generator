@@ -17,9 +17,15 @@ class Settings(BaseSettings):
     # --- LLM provider (decoupled via app/services/llm) ---
     # Swap AI platforms by changing llm_provider + implementing an adapter.
     llm_provider: str = Field(default="gemini", validation_alias="LLM_PROVIDER")
-    llm_model: str = Field(default="gemini-2.0-flash", validation_alias="LLM_MODEL")
+    # gemini-2.0-flash is listed by the API but serves 429 with `limit: 0` — it
+    # carries no free-tier request quota, which stalled the whole ingestion
+    # pipeline. 2.5-flash is the current generally-available flash model.
+    llm_model: str = Field(default="gemini-2.5-flash", validation_alias="LLM_MODEL")
+    # text-embedding-004 has been retired and now 404s. gemini-embedding-001 is
+    # its replacement; it defaults to 3072 dims, so the adapter pins the output
+    # to EMBED_DIM (768) to match historical_chunks.embedding.
     embedding_model: str = Field(
-        default="text-embedding-004", validation_alias="EMBEDDING_MODEL"
+        default="gemini-embedding-001", validation_alias="EMBEDDING_MODEL"
     )
 
     # --- S3 / object storage (Story 2.2) ---
@@ -48,6 +54,22 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = Field(
         default=30, validation_alias="REFRESH_TOKEN_EXPIRE_DAYS"
     )
+
+    # --- Auth rate limiting (GAP_ANALYSIS §2.3) ---
+    # Counts failed attempts only, so a legitimate user is never throttled.
+    rate_limit_enabled: bool = Field(default=True, validation_alias="RATE_LIMIT_ENABLED")
+    # Per-account: the control that a rotating botnet cannot evade.
+    login_max_failures_per_account: int = Field(
+        default=10, validation_alias="LOGIN_MAX_FAILURES_PER_ACCOUNT"
+    )
+    # Per-IP: catches spraying one password across many accounts. Higher, since
+    # an office NAT legitimately shares an address.
+    login_max_failures_per_ip: int = Field(
+        default=50, validation_alias="LOGIN_MAX_FAILURES_PER_IP"
+    )
+    login_failure_window_seconds: int = Field(
+        default=900, validation_alias="LOGIN_FAILURE_WINDOW_SECONDS"
+    )  # 15 minutes
 
     # --- Celery / Redis worker queue (Story 2.5) ---
     celery_broker_url: str = Field(

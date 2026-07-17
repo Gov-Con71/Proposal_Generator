@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS historical_chunks (
     uploaded_by UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE, -- tenant boundary
     source_name VARCHAR(255) NOT NULL,   -- e.g. "USCG Pump Overhaul 2024"
     content TEXT NOT NULL,               -- the raw chunk text
-    embedding vector(768),               -- google-genai text-embedding-004
+    embedding vector(768),               -- google-genai gemini-embedding-001, pinned to 768 dims
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 

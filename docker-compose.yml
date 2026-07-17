@@ -60,6 +60,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile.backend
     container_name: fastapi_backend_app
+    # Without this the API is the one service that never comes back after a
+    # crash or host reboot, while every dependency does — the failure then looks
+    # like a broken app rather than a stopped container.
+    restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
@@ -106,6 +110,11 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      # The worker writes requirements straight to the DB, so it must evict what
+      # the API cached on its behalf. Without this it silently falls back to
+      # localhost, the cache is never invalidated, and a freshly ingested RFP
+      # shows an empty workspace for a full TTL.
+      - CACHE_URL=redis://redis:6379/2
       - USE_LOCALSTACK=true
       - LOCALSTACK_ENDPOINT=http://localstack:4566
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-proposal-artifacts-local}

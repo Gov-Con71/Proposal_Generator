@@ -19,9 +19,15 @@ def _conn():
 
 @pytest.fixture
 def proposal_with_requirements():
-    """Seeds a user + rfp_document + two extracted requirements; cleans up after."""
+    """Seeds a user + rfp_document + a proposal linked to it + two requirements.
+
+    The proposal matters: `/proposals/{id}/…` is addressed by proposal_id and
+    resolves to the rfp internally, so a document with no proposal is
+    unreachable through the API (GAP_ANALYSIS §1.2).
+    """
     user_id = str(uuid.uuid4())
     rfp_id = str(uuid.uuid4())
+    proposal_id = str(uuid.uuid4())
     conn = _conn()
     cur = conn.cursor()
     cur.execute(
@@ -34,6 +40,11 @@ def proposal_with_requirements():
         "VALUES (%s, %s, 'rfp.pdf', 'k', 'completed');",
         (rfp_id, user_id),
     )
+    cur.execute(
+        "INSERT INTO proposals (proposal_id, owned_by, rfp_id, title) "
+        "VALUES (%s, %s, %s, 'RAG Test Proposal');",
+        (proposal_id, user_id, rfp_id),
+    )
     cur.executemany(
         "INSERT INTO extracted_requirements (rfp_id, section_number, raw_text_content, category) "
         "VALUES (%s, %s, %s, %s);",
@@ -45,7 +56,7 @@ def proposal_with_requirements():
     conn.commit()
     cur.close()
     conn.close()
-    yield {"user_id": user_id, "rfp_id": rfp_id}
+    yield {"user_id": user_id, "rfp_id": rfp_id, "proposal_id": proposal_id}
     conn = _conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM users WHERE user_id = %s;", (user_id,))  # cascades
@@ -60,13 +71,13 @@ def _auth(user_id: str) -> dict:
 
 
 def test_requirements_read_and_patch(test_client, proposal_with_requirements):
-    rfp_id = proposal_with_requirements["rfp_id"]
+    proposal_id = proposal_with_requirements["proposal_id"]
     auth = _auth(proposal_with_requirements["user_id"])
 
     # unauthenticated -> 401
-    assert test_client.get(f"/proposals/{rfp_id}/requirements").status_code == 401
+    assert test_client.get(f"/proposals/{proposal_id}/requirements").status_code == 401
 
-    r = test_client.get(f"/proposals/{rfp_id}/requirements", headers=auth)
+    r = test_client.get(f"/proposals/{proposal_id}/requirements", headers=auth)
     assert r.status_code == 200
     reqs = r.json()
     assert len(reqs) == 2
@@ -82,7 +93,7 @@ def test_requirements_read_and_patch(test_client, proposal_with_requirements):
 
     # cross-tenant read -> 404
     other = _auth(str(uuid.uuid4()))
-    assert test_client.get(f"/proposals/{rfp_id}/requirements", headers=other).status_code == 404
+    assert test_client.get(f"/proposals/{proposal_id}/requirements", headers=other).status_code == 404
 
 
 def test_history_ingest_and_retrieval(monkeypatch, test_client, proposal_with_requirements):
@@ -125,18 +136,18 @@ def test_generate_section_uses_draft_writer(monkeypatch, test_client, proposal_w
         lambda uid, text, top_k=5: {"content": "Our proven approach…", "citations": []},
     )
 
-    rfp_id = proposal_with_requirements["rfp_id"]
+    proposal_id = proposal_with_requirements["proposal_id"]
     auth = _auth(proposal_with_requirements["user_id"])
-    req_id = test_client.get(f"/proposals/{rfp_id}/requirements", headers=auth).json()[0]["id"]
+    req_id = test_client.get(f"/proposals/{proposal_id}/requirements", headers=auth).json()[0]["id"]
 
     gen = test_client.post(
-        f"/proposals/{rfp_id}/sections/generate",
+        f"/proposals/{proposal_id}/sections/generate",
         json={"requirementId": req_id},
         headers=auth,
     )
     assert gen.status_code == 201
     assert gen.json()["content"] == "Our proven approach…"
 
-    sections = test_client.get(f"/proposals/{rfp_id}/sections", headers=auth)
+    sections = test_client.get(f"/proposals/{proposal_id}/sections", headers=auth)
     assert sections.status_code == 200
     assert len(sections.json()) == 1

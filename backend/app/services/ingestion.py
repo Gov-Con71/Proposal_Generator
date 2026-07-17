@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 from uuid import UUID
 
+from app.core import cache
 from app.services import document_service as docs
 from app.services.compliance_extractor import run_extraction
 from app.services.document_parser import DocumentParseError, parse_to_markdown
@@ -56,6 +57,20 @@ async def run_ingestion(rfp_id: UUID) -> int:
 
         count = docs.insert_requirements(rfp_id, matrix)
         docs.update_status(rfp_id, "completed")
+
+        # The read routes cache requirements/compliance per (tenant, rfp). The
+        # process page polls while ingestion runs, so an empty list is almost
+        # always cached before the worker inserts anything — without this the
+        # workspace shows "no requirements yet" for a full TTL after a
+        # successful extraction. The worker writes straight to the DB, so it
+        # must evict what the API cached on its behalf.
+        owner = document["uploaded_by"]
+        cache.cache_delete(
+            cache.requirements_key(owner, rfp_id),
+            cache.compliance_key(owner, rfp_id),
+            cache.sections_key(owner, rfp_id),
+        )
+
         logger.info("Ingestion complete: rfp=%s requirements=%d", rfp_id, count)
         return count
     except DocumentParseError:

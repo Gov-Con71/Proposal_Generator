@@ -169,6 +169,82 @@ def test_register_joins_company_and_defaults_to_analyst(
     assert ua["companyId"] == ub["companyId"]
 
 
+def test_login_is_rate_limited_after_repeated_failures(test_client, cleanup_emails, monkeypatch):
+    """Unlimited password guessing was possible: 20 rapid wrong passwords all
+    returned a plain 401 with no throttling."""
+    from app.core.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "login_max_failures_per_account", 3)
+    email = f"auth_{uuid.uuid4().hex[:8]}@example.com"
+    cleanup_emails.append(email)
+    _register(test_client, email)
+
+    for _ in range(3):
+        assert test_client.post(
+            "/auth/login", json={"email": email, "password": "wrong"}
+        ).status_code == 401
+
+    # Budget spent — further attempts are refused before bcrypt even runs.
+    blocked = test_client.post("/auth/login", json={"email": email, "password": "wrong"})
+    assert blocked.status_code == 429
+    assert int(blocked.headers["Retry-After"]) > 0
+
+    # The real password is refused too while the window is open: an attacker who
+    # eventually guesses right must not be let in.
+    assert test_client.post(
+        "/auth/login", json={"email": email, "password": "s3cret!"}
+    ).status_code == 429
+
+
+def test_successful_login_clears_the_failure_budget(test_client, cleanup_emails, monkeypatch):
+    """Only failures count, so a user who fumbles their password then gets it
+    right is not throttled on their next attempt."""
+    from app.core.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "login_max_failures_per_account", 3)
+    email = f"auth_{uuid.uuid4().hex[:8]}@example.com"
+    cleanup_emails.append(email)
+    _register(test_client, email)
+
+    for _ in range(2):  # two fumbles, one short of the limit
+        assert test_client.post(
+            "/auth/login", json={"email": email, "password": "wrong"}
+        ).status_code == 401
+
+    assert test_client.post(
+        "/auth/login", json={"email": email, "password": "s3cret!"}
+    ).status_code == 200
+
+    # The budget reset, so the next fumble starts from zero rather than tripping.
+    assert test_client.post(
+        "/auth/login", json={"email": email, "password": "wrong"}
+    ).status_code == 401
+
+
+def test_rate_limiting_cannot_lock_a_victim_out(test_client, cleanup_emails, monkeypatch):
+    """Per-account throttling must not become a denial-of-service: an attacker
+    burning one account's budget must not affect a different account."""
+    from app.core.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "login_max_failures_per_account", 3)
+    victim = f"auth_{uuid.uuid4().hex[:8]}@example.com"
+    bystander = f"auth_{uuid.uuid4().hex[:8]}@example.com"
+    cleanup_emails.extend([victim, bystander])
+    _register(test_client, victim)
+    _register(test_client, bystander)
+
+    for _ in range(4):  # attacker exhausts the victim's budget
+        test_client.post("/auth/login", json={"email": victim, "password": "wrong"})
+    assert test_client.post(
+        "/auth/login", json={"email": victim, "password": "s3cret!"}
+    ).status_code == 429
+
+    # The bystander is untouched — buckets are per-account, not global.
+    assert test_client.post(
+        "/auth/login", json={"email": bystander, "password": "s3cret!"}
+    ).status_code == 200
+
+
 def test_viewer_role_is_read_only(test_client, cleanup_emails):
     """Roles are read from the database per request, so a demotion takes effect
     immediately rather than when the access token happens to expire."""

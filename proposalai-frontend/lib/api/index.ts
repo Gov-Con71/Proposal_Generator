@@ -53,6 +53,10 @@ export const proposalsApi = {
 
 // ─── documents.ts ─────────────────────────────────────────────────────────────
 export interface UploadResult {
+  /** The proposal created for this upload — the id every /proposals/… route
+   *  is keyed on, and what the client navigates by. */
+  proposalId: string
+  /** The ingested RFP behind it. Only needed for /documents/{rfpId} status. */
   rfpId: string
   fileName: string
   sizeBytes: number

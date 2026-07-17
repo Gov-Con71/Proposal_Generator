@@ -16,6 +16,9 @@ logger = logging.getLogger("llm.telemetry")
 # Rough public list prices (USD per 1M tokens) for cost estimation. Adjust as
 # pricing changes — this is for a ballpark spend dashboard, not billing.
 _PRICES = {
+    "gemini-2.5-flash": {"in": 0.30, "out": 2.50},
+    "gemini-embedding-001": {"in": 0.15, "out": 0.0},
+    # Retained so historical spend for retired models still resolves.
     "gemini-2.0-flash": {"in": 0.10, "out": 0.40},
     "text-embedding-004": {"in": 0.0, "out": 0.0},
 }

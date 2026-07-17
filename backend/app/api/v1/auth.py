@@ -8,8 +8,10 @@ tokens. Refresh tokens are opaque, stored hashed, and rotated on every use.
 import logging
 from datetime import timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from app.core import rate_limit
+from app.core.config import settings
 from app.core.deps import get_current_user_id
 from app.core.security import create_access_token
 from app.models.contract import (
@@ -61,13 +63,38 @@ def register(payload: RegisterRequest) -> Session:
 
 
 @router.post("/login", response_model=Session, summary="Authenticate and open a session")
-def login(payload: LoginRequest) -> Session:
+def login(payload: LoginRequest, request: Request) -> Session:
+    account = payload.email.lower().strip()
+    ip = rate_limit.client_ip(request)
+    window = settings.login_failure_window_seconds
+
+    # Check both buckets before touching bcrypt — a throttled caller should cost
+    # us nothing, and hashing is deliberately expensive.
+    for bucket, ident, limit in (
+        ("login_account", account, settings.login_max_failures_per_account),
+        ("login_ip", ip, settings.login_max_failures_per_ip),
+    ):
+        retry_after = rate_limit.check(bucket, ident, limit)
+        if retry_after:
+            logger.warning("Rate limited login for %s=%s", bucket, ident)
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Too many failed sign-in attempts. Try again shortly.",
+                headers={"Retry-After": str(retry_after)},
+            )
+
     try:
         user = users.authenticate(payload.email, payload.password)
     except users.InvalidCredentialsError as exc:
+        # Count only failures, so a correct password is never throttled and an
+        # attacker cannot lock a victim out by exhausting their budget.
+        rate_limit.record_failure("login_account", account, window)
+        rate_limit.record_failure("login_ip", ip, window)
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "Incorrect email or password."
         ) from exc
+
+    rate_limit.reset("login_account", account)
     return _session_for(user)
 
 

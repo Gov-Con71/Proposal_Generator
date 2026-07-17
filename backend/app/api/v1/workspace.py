@@ -2,7 +2,14 @@
 
 Real requirement/section reads and edits (paths mirror the frontend client),
 plus the context-aware draft writer. All routes are JWT-secured and tenant-
-scoped via rfp_documents ownership.
+scoped via proposal ownership.
+
+Addressing: every `/proposals/{proposal_id}/…` route takes a **proposal id**,
+matching the rest of that namespace (CRUD, integrity, exports). Requirements and
+sections are stored against the underlying `rfp_id`; `_rfp(...)` is the only
+place that translates. Previously these routes took an rfp_id directly while the
+dashboard linked a proposal id, so every workspace opened from the dashboard
+404'd (GAP_ANALYSIS.md §1.2).
 """
 
 import logging
@@ -20,7 +27,7 @@ from app.models.contract import (
     SectionCreate,
     SectionUpdate,
 )
-from app.services import draft_writer, workspace_service as ws
+from app.services import draft_writer, proposals_service, workspace_service as ws
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +41,28 @@ def _guard(fn, *args):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found.") from exc
 
 
+def _rfp(proposal_id: UUID, user_id: UUID) -> UUID:
+    """Resolves the addressed proposal to the document its content hangs off."""
+    try:
+        return proposals_service.rfp_for_proposal(proposal_id, user_id)
+    except proposals_service.NotFoundError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found.") from exc
+    except proposals_service.NoLinkedDocumentError as exc:
+        # The proposal is real, it just has no RFP yet — a 409 says "not usable
+        # yet" where a 404 would wrongly imply the proposal doesn't exist.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This proposal has no ingested RFP yet. Upload one to populate its workspace.",
+        ) from exc
+
+
 # --- requirements -----------------------------------------------------------
 
-@router.get("/proposals/{rfp_id}/requirements", response_model=list[Requirement])
-def list_requirements(rfp_id: UUID, user_id: UUID = Depends(get_current_user_id)):
+@router.get("/proposals/{proposal_id}/requirements", response_model=list[Requirement])
+def list_requirements(proposal_id: UUID, user_id: UUID = Depends(get_current_user_id)):
+    rfp_id = _rfp(proposal_id, user_id)
+    # Cache stays keyed on rfp_id: requirements are per-document, so two
+    # proposals on one RFP share the entry rather than duplicating it.
     key = cache.requirements_key(user_id, rfp_id)
     cached = cache.cache_get(key)
     if cached is not None:
@@ -55,8 +80,8 @@ def update_requirement(
 ):
     result = _guard(ws.update_requirement, requirement_id, user_id, patch)
     cache.cache_delete(
-        cache.requirements_key(user_id, result.proposal_id),
-        cache.compliance_key(user_id, result.proposal_id),
+        cache.requirements_key(user_id, result.document_id),
+        cache.compliance_key(user_id, result.document_id),
     )
     return result
 
@@ -76,11 +101,12 @@ def delete_requirement(
 # --- sections ---------------------------------------------------------------
 
 def _invalidate_sections(user_id: UUID, section: ProposalSection) -> None:
-    cache.cache_delete(cache.sections_key(user_id, section.proposal_id))
+    cache.cache_delete(cache.sections_key(user_id, section.document_id))
 
 
-@router.get("/proposals/{rfp_id}/sections", response_model=list[ProposalSection])
-def list_sections(rfp_id: UUID, user_id: UUID = Depends(get_current_user_id)):
+@router.get("/proposals/{proposal_id}/sections", response_model=list[ProposalSection])
+def list_sections(proposal_id: UUID, user_id: UUID = Depends(get_current_user_id)):
+    rfp_id = _rfp(proposal_id, user_id)
     key = cache.sections_key(user_id, rfp_id)
     cached = cache.cache_get(key)
     if cached is not None:
@@ -91,14 +117,15 @@ def list_sections(rfp_id: UUID, user_id: UUID = Depends(get_current_user_id)):
 
 
 @router.post(
-    "/proposals/{rfp_id}/sections",
+    "/proposals/{proposal_id}/sections",
     response_model=ProposalSection,
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_writer)],
 )
 def create_section(
-    rfp_id: UUID, payload: SectionCreate, user_id: UUID = Depends(get_current_user_id)
+    proposal_id: UUID, payload: SectionCreate, user_id: UUID = Depends(get_current_user_id)
 ):
+    rfp_id = _rfp(proposal_id, user_id)
     result = _guard(ws.create_section, rfp_id, user_id, payload.title, payload.requirement_id)
     _invalidate_sections(user_id, result)
     return result
@@ -137,17 +164,18 @@ def regenerate_section(section_id: UUID, user_id: UUID = Depends(get_current_use
 
 
 @router.post(
-    "/proposals/{rfp_id}/sections/generate",
+    "/proposals/{proposal_id}/sections/generate",
     response_model=ProposalSection,
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_writer)],
 )
 def generate_section(
-    rfp_id: UUID,
+    proposal_id: UUID,
     payload: GenerateSectionRequest,
     user_id: UUID = Depends(get_current_user_id),
 ):
     """Creates a new section for a requirement and fills it with a RAG draft."""
+    rfp_id = _rfp(proposal_id, user_id)
     # list_requirements enforces rfp ownership for this tenant.
     requirements = _guard(ws.list_requirements, rfp_id, user_id)
     match = next((r for r in requirements if r.id == payload.requirement_id), None)
