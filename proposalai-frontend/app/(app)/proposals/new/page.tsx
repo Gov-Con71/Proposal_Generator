@@ -154,21 +154,6 @@ export default function UploadPage() {
             </button>
           </div>
         )}
-
-        {/* Demo: show pre-loaded file if none uploaded */}
-        {!file && (
-          <div className="flex items-center gap-3 mt-3 px-3 py-2.5 bg-[var(--bg-secondary)] rounded-lg border border-[var(--border-subtle)]">
-            <FileText className="w-5 h-5 text-danger-600 shrink-0" />
-            <div className="flex-1">
-              <p className="text-xs font-medium">RFP_823-A.pdf</p>
-              <p className="text-[10px] text-[var(--text-tertiary)]">1.4 MB</p>
-            </div>
-            <CheckCircle2 className="w-4 h-4 text-success-400 shrink-0" />
-            <button className="text-[var(--text-tertiary)] hover:text-danger-600 transition-colors">
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
         {/* Upload progress */}
         {uploading && (
           <div className="mt-3">
