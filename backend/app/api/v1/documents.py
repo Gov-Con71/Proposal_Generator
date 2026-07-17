@@ -20,6 +20,7 @@ from app.models.contract import CamelModel, ProposalCreate
 from app.services import document_service as docs
 from app.services import proposals_service as proposals
 from app.services.s3_storage import S3Storage
+from app.services.solicitation_extractor import SolicitationSummary
 from app.worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,31 @@ def get_status(
         processing_status=document["processing_status"],
         requirements_count=docs.count_requirements(rfp_id),
     )
+
+
+@router.get(
+    "/{rfp_id}/summary",
+    response_model=SolicitationSummary,
+    summary="Read the extracted solicitation summary for a document",
+)
+def read_solicitation_summary(
+    rfp_id: UUID, uploaded_by: UUID = Depends(get_current_user_id)
+) -> SolicitationSummary:
+    """Returns the document-level solicitation summary (administrative, deadlines,
+    submission requirements, technical core), each value carrying its source_quote.
+
+    The summary is a best-effort, supplementary artifact extracted during
+    ingestion, so it may be absent even for a fully processed document — 404 until
+    it exists (a polling client can treat that as 'not ready yet'). The response is
+    the summary verbatim in its original snake_case citation schema.
+    """
+    _owned_document_or_404(rfp_id, uploaded_by)
+    summary = docs.get_solicitation_summary(rfp_id)
+    if summary is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "Solicitation summary not available yet."
+        )
+    return SolicitationSummary.model_validate(summary)
 
 
 @router.post(

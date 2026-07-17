@@ -25,6 +25,34 @@ from app.core.config import settings
 from app.core.security import create_access_token
 from app.services import ingestion
 from app.services.compliance_extractor import ComplianceMatrix, ExtractedRequirement
+from app.services.solicitation_extractor import (
+    Administrative,
+    Citation,
+    Deadlines,
+    SolicitationSummary,
+    SubmissionMethod,
+    SubmissionRequirements,
+    TechnicalCore,
+)
+
+
+def _null_summary() -> SolicitationSummary:
+    """A minimal all-null summary for stubbing the supplementary extraction."""
+    c = lambda: Citation(value=None, source_quote=None)
+    return SolicitationSummary(
+        administrative=Administrative(
+            solicitation_number=c(), agency_or_organization=c(),
+            title_of_opportunity=c(), naics_code=c(), set_aside_type=c(),
+        ),
+        deadlines=Deadlines(
+            questions_due_date=c(), proposal_due_date=c(), period_of_performance=c()
+        ),
+        submission_requirements=SubmissionRequirements(
+            submission_method=SubmissionMethod(value=None, description=None, source_quote=None),
+            page_limits=[], required_volumes_or_sections=[],
+        ),
+        technical_core=TechnicalCore(primary_objective=c(), key_deliverables=[]),
+    )
 
 
 @pytest.fixture
@@ -58,6 +86,16 @@ def _count_requirements(rfp_id: str) -> int:
     return count
 
 
+def _fetch_summary(rfp_id: str):
+    conn = psycopg2.connect(settings.database_url)
+    cur = conn.cursor()
+    cur.execute("SELECT solicitation_summary FROM rfp_documents WHERE rfp_id = %s;", (rfp_id,))
+    (summary,) = cur.fetchone()
+    cur.close()
+    conn.close()
+    return summary  # psycopg2 decodes JSONB to dict (or None)
+
+
 @mock_aws
 def test_upload_to_requirements_end_to_end(test_client, seeded_user, monkeypatch):
     # Use the moto-intercepted default boto3 client rather than LocalStack.
@@ -81,6 +119,13 @@ def test_upload_to_requirements_end_to_end(test_client, seeded_user, monkeypatch
         )
 
     monkeypatch.setattr(ingestion, "run_extraction", fake_extract)
+
+    # Isolate the supplementary solicitation-summary LLM call too (deterministic,
+    # no live provider); the pipeline should persist whatever it returns.
+    async def fake_solicitation(_markdown: str) -> SolicitationSummary:
+        return _null_summary()
+
+    monkeypatch.setattr(ingestion, "run_solicitation_extraction", fake_solicitation)
 
     # Capture the enqueue instead of hitting Redis; we drive the worker below.
     from app.api.v1 import documents as documents_mod
@@ -127,3 +172,23 @@ def test_upload_to_requirements_end_to_end(test_client, seeded_user, monkeypatch
     assert status_resp.status_code == 200
     assert status_resp.json()["processingStatus"] == "completed"
     assert status_resp.json()["requirementsCount"] == 2
+
+    # --- Sprint 8: the solicitation summary was extracted and stored as JSONB ---
+    summary = _fetch_summary(rfp_id)
+    assert summary is not None
+    assert set(summary) == {"administrative", "deadlines", "submission_requirements", "technical_core"}
+
+    # --- Sprint 8: the summary is readable via the API in its snake_case schema ---
+    sum_resp = test_client.get(f"/documents/{rfp_id}/summary", headers=auth)
+    assert sum_resp.status_code == 200, sum_resp.text
+    body = sum_resp.json()
+    assert set(body) == {"administrative", "deadlines", "submission_requirements", "technical_core"}
+    # snake_case citation shape is preserved verbatim (not camelCased)
+    assert body["administrative"]["solicitation_number"] == {"value": None, "source_quote": None}
+    # unknown / cross-tenant document is a 404, not a leak
+    assert test_client.get(f"/documents/{uuid.uuid4()}/summary", headers=auth).status_code == 404
+
+    # --- Re-analyze replaces the matrix instead of duplicating it (bug #1) ---
+    count_again = ingestion.run_ingestion_sync(rfp_id)
+    assert count_again == 2
+    assert _count_requirements(rfp_id) == 2  # still 2 total, not 4

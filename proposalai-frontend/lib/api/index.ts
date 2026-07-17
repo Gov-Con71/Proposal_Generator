@@ -52,6 +52,8 @@ export const proposalsApi = {
 }
 
 // ─── documents.ts ─────────────────────────────────────────────────────────────
+import type { SolicitationSummary } from '@/types'
+
 export interface UploadResult {
   /** The proposal created for this upload — the id every /proposals/… route
    *  is keyed on, and what the client navigates by. */
@@ -88,6 +90,13 @@ export const documentsApi = {
   // Poll ingestion status (pending → parsing → extracting → completed/failed).
   status: (rfpId: string) =>
     apiClient.get<DocumentStatus>(`/documents/${rfpId}`).then((r) => r.data),
+
+  // Read the extracted solicitation summary (GET /documents/{rfpId}/summary).
+  // Supplementary/best-effort: the server returns 404 until it exists, so a
+  // polling caller should treat a 404 as "not ready yet" rather than an error.
+  // The payload is verbatim snake_case (see SolicitationSummary).
+  getSummary: (rfpId: string) =>
+    apiClient.get<SolicitationSummary>(`/documents/${rfpId}/summary`).then((r) => r.data),
 
   reanalyze: (documentId: string) =>
     apiClient.post<DocumentStatus>(`/documents/${documentId}/reanalyze`).then((r) => r.data),

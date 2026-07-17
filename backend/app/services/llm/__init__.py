@@ -33,6 +33,7 @@ def _build_provider() -> LLMProvider:
             model=settings.llm_model,
             embed_model=settings.embedding_model,
             embed_dim=_EMBEDDING_DIM,
+            request_timeout_ms=settings.llm_request_timeout_seconds * 1000,
         )
     raise ValueError(
         f"Unknown LLM_PROVIDER '{settings.llm_provider}'. Implement an LLMProvider "

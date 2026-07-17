@@ -37,21 +37,37 @@ def _unit(vector: list[float]) -> list[float]:
 
 
 class GeminiProvider(LLMProvider):
-    def __init__(self, *, model: str, embed_model: str, embed_dim: int) -> None:
+    def __init__(
+        self,
+        *,
+        model: str,
+        embed_model: str,
+        embed_dim: int,
+        request_timeout_ms: int | None = None,
+    ) -> None:
         self._model = model
         self._embed_model = embed_model
         self._embed_dim = embed_dim
+        self._request_timeout_ms = request_timeout_ms
         self._client_obj = None
 
     def _client(self):
         # Built on first use, then reused; keeps `google.genai` out of import time.
         if self._client_obj is None:
             from google import genai
+            from google.genai import types
 
             api_key = os.getenv("GEMINI_API_KEY")
             if not api_key:
                 raise RuntimeError("GEMINI_API_KEY is not set; cannot call the LLM.")
-            self._client_obj = genai.Client(api_key=api_key)
+            # Client-level timeout applies to every call (generation + embeddings),
+            # so no single request can hang a worker thread indefinitely.
+            http_options = (
+                types.HttpOptions(timeout=self._request_timeout_ms)
+                if self._request_timeout_ms
+                else None
+            )
+            self._client_obj = genai.Client(api_key=api_key, http_options=http_options)
         return self._client_obj
 
     def generate_text(self, prompt: str, *, system: Optional[str] = None) -> str:

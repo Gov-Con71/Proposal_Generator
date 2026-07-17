@@ -185,6 +185,7 @@ def _to_section(row: dict) -> ProposalSection:
         ai_flags=[],
         mapped_requirement_ids=[str(row["requirement_id"])] if row.get("requirement_id") else [],
         reference_tags=[],
+        review_notes=row.get("review_notes"),
         last_edited_at=row["updated_at"].isoformat() if row.get("updated_at") else "",
         last_edited_by="",
     )
@@ -192,7 +193,7 @@ def _to_section(row: dict) -> ProposalSection:
 
 _SECTION_COLS = (
     "section_id, rfp_id, requirement_id, section_title, generated_draft_content, "
-    "status, created_at, updated_at"
+    "status, review_notes, created_at, updated_at"
 )
 
 

@@ -20,10 +20,25 @@ from app.core import cache
 from app.services import document_service as docs
 from app.services.compliance_extractor import run_extraction
 from app.services.document_parser import DocumentParseError, parse_to_markdown
-from app.services.guardrails import sanitize_matrix
+from app.services.guardrails import sanitize_matrix, sanitize_solicitation_summary
 from app.services.s3_storage import S3Storage
+from app.services.solicitation_extractor import run_solicitation_extraction
 
 logger = logging.getLogger(__name__)
+
+
+async def _safe_solicitation_summary(rfp_id: UUID, markdown_text: str):
+    """Best-effort solicitation-summary extraction; never raises.
+
+    The summary is supplementary to the compliance matrix, so a failure here
+    (bad model output, timeout) is logged and swallowed — returning None — rather
+    than failing the whole ingestion run.
+    """
+    try:
+        return await run_solicitation_extraction(markdown_text)
+    except Exception:
+        logger.exception("Solicitation summary extraction failed for rfp=%s; continuing", rfp_id)
+        return None
 
 
 async def run_ingestion(rfp_id: UUID) -> int:
@@ -48,13 +63,37 @@ async def run_ingestion(rfp_id: UUID) -> int:
         markdown_text = await parse_to_markdown(local_path)
 
         docs.update_status(rfp_id, "extracting")
-        matrix = await run_extraction(markdown_text)
+        # Two independent LLM reads of the same Markdown: the compliance matrix
+        # (critical path) and the document-level solicitation summary
+        # (supplementary). Run them concurrently; a summary failure must not sink
+        # ingestion, so it is shielded and its result may be None.
+        matrix, summary = await asyncio.gather(
+            run_extraction(markdown_text),
+            _safe_solicitation_summary(rfp_id, markdown_text),
+        )
+        # Verify the summary's citations against the source and drop fabricated
+        # ones, then persist. Always write (None clears any now-stale summary if a
+        # re-analysis produced nothing) so the column can't drift out of sync.
+        clean_summary = None
+        if summary is not None:
+            clean_summary, ungrounded = sanitize_solicitation_summary(
+                summary.model_dump(), markdown_text
+            )
+            if ungrounded:
+                logger.info(
+                    "Ingestion rfp=%s: dropped %d ungrounded summary citation(s)",
+                    rfp_id,
+                    ungrounded,
+                )
+        docs.update_solicitation_summary(rfp_id, clean_summary)
 
         # Guardrail: drop malformed/hallucinated/duplicate items before persisting.
         matrix, rejected = sanitize_matrix(matrix)
         if rejected:
             logger.info("Ingestion rfp=%s: guardrails rejected %d requirement(s)", rfp_id, rejected)
 
+        # insert_requirements atomically replaces the prior matrix, so re-analyzing
+        # an RFP never appends duplicates.
         count = docs.insert_requirements(rfp_id, matrix)
         docs.update_status(rfp_id, "completed")
 

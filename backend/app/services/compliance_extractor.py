@@ -44,14 +44,16 @@ class ExtractionState(TypedDict):
 
 def _extract_compliance_node(state: ExtractionState) -> ExtractionState:
     """Single graph node: structured extraction via the configured LLM provider."""
+    from app.services.extraction_input import guard_extraction_input
     from app.services.llm import get_llm
 
+    document = guard_extraction_input(state["markdown_text"], label="compliance extraction")
     logger.info(
         "_extract_compliance_node: sending %d chars of markdown to the LLM",
-        len(state["markdown_text"]),
+        len(document),
     )
     result: ComplianceMatrix = get_llm().generate_structured(
-        f"DOCUMENT:\n{state['markdown_text']}",
+        f"DOCUMENT:\n{document}",
         ComplianceMatrix,
         system=_SYSTEM_PROMPT,
     )
