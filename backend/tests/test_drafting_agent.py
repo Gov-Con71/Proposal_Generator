@@ -105,7 +105,7 @@ def test_draft_full_proposal_end_to_end(seeded_rfp, monkeypatch):
     monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)
 
     # Section writer returns deterministic prose (no retrieval / Gemini).
-    def fake_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None):
+    def fake_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None, solicitation_context=None):
         return {"content": f"Draft for {section_title}.", "citations": []}
 
     monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
@@ -149,7 +149,7 @@ def test_critic_drives_one_revision(seeded_rfp, monkeypatch):
 
     draft_calls: list[str | None] = []
 
-    def fake_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None):
+    def fake_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None, solicitation_context=None):
         draft_calls.append(feedback)
         return {"content": f"Draft v{len(draft_calls)}.", "citations": []}
 
@@ -185,7 +185,7 @@ def test_draft_failure_is_isolated_to_section(seeded_rfp, monkeypatch):
     monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)  # never reached
 
     # The writer blows up with a non-guardrail error (e.g. retrieval / LLM timeout).
-    def exploding_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None):
+    def exploding_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None, solicitation_context=None):
         raise RuntimeError("retrieval backend unavailable")
 
     monkeypatch.setattr(drafting_agent, "generate_section_draft", exploding_section_draft)
@@ -221,7 +221,7 @@ def test_exhausted_critic_persists_review_notes(seeded_rfp, monkeypatch):
 
     draft_calls: list[str | None] = []
 
-    def fake_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None):
+    def fake_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None, solicitation_context=None):
         draft_calls.append(feedback)
         return {"content": f"Draft v{len(draft_calls)}.", "citations": []}
 
@@ -256,7 +256,7 @@ def test_critic_failure_saves_draft_unreviewed(seeded_rfp, monkeypatch):
 
     draft_calls: list[str | None] = []
 
-    def fake_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None):
+    def fake_section_draft(uploaded_by, section_title, requirement_texts, top_k=5, feedback=None, solicitation_context=None):
         draft_calls.append(feedback)
         return {"content": "Draft v1.", "citations": []}
 

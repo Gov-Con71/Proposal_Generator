@@ -9,7 +9,9 @@ actually made) to keep the API import chain and unit tests SDK-free.
 import logging
 import math
 import os
-from typing import Optional, Type, TypeVar
+import re
+import time
+from typing import Callable, Optional, Type, TypeVar
 
 from pydantic import BaseModel
 
@@ -19,6 +21,23 @@ from app.services.llm.base import LLMProvider
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+# HTTP statuses worth retrying: 429 (rate limit) and 503 (transient unavailable).
+_RETRYABLE_CODES = {429, 503}
+# Never sleep longer than this between attempts, even if the API asks for more.
+_RETRY_CAP_SECONDS = 60.0
+# Pulls a delay hint out of the error, e.g. "'retryDelay': '34s'" or
+# "Please retry in 34.28s" — both shapes appear in Gemini 429 payloads.
+_RETRY_DELAY_RE = re.compile(
+    r"(?:retrydelay['\":\s]*'?|retry in )(\d+(?:\.\d+)?)s", re.IGNORECASE
+)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    if getattr(exc, "code", None) in _RETRYABLE_CODES:
+        return True
+    text = str(exc)
+    return "RESOURCE_EXHAUSTED" in text or "UNAVAILABLE" in text
 
 
 def _unit(vector: list[float]) -> list[float]:
@@ -44,12 +63,46 @@ class GeminiProvider(LLMProvider):
         embed_model: str,
         embed_dim: int,
         request_timeout_ms: int | None = None,
+        max_retries: int = 5,
+        retry_base_seconds: float = 2.0,
     ) -> None:
         self._model = model
         self._embed_model = embed_model
         self._embed_dim = embed_dim
         self._request_timeout_ms = request_timeout_ms
+        self._max_retries = max_retries
+        self._retry_base_seconds = retry_base_seconds
         self._client_obj = None
+
+    def _retry_delay(self, exc: Exception, attempt: int) -> float:
+        """Seconds to wait before the next attempt: the API's own hint if present
+        (plus a small cushion for the quota-window edge), else exponential backoff."""
+        match = _RETRY_DELAY_RE.search(str(exc))
+        if match:
+            return min(float(match.group(1)) + 1.0, _RETRY_CAP_SECONDS)
+        return min(self._retry_base_seconds * (2 ** attempt), _RETRY_CAP_SECONDS)
+
+    def _with_retry(self, call: Callable[[], T], *, what: str) -> T:
+        """Runs `call`, retrying transient 429/503 responses so a brief quota
+        overrun doesn't fail the request (and leave e.g. an empty draft section)."""
+        attempt = 0
+        while True:
+            try:
+                return call()
+            except Exception as exc:
+                if attempt >= self._max_retries or not _is_retryable(exc):
+                    raise
+                delay = self._retry_delay(exc, attempt)
+                attempt += 1
+                logger.warning(
+                    "Gemini %s throttled/unavailable (%s); retry %d/%d in %.1fs",
+                    what,
+                    getattr(exc, "code", "?"),
+                    attempt,
+                    self._max_retries,
+                    delay,
+                )
+                time.sleep(delay)
 
     def _client(self):
         # Built on first use, then reused; keeps `google.genai` out of import time.
@@ -75,10 +128,13 @@ class GeminiProvider(LLMProvider):
 
         start = telemetry.now()
         try:
-            response = self._client().models.generate_content(
-                model=self._model,
-                contents=prompt,
-                config=types.GenerateContentConfig(system_instruction=system),
+            response = self._with_retry(
+                lambda: self._client().models.generate_content(
+                    model=self._model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(system_instruction=system),
+                ),
+                what="generate_text",
             )
         except Exception:
             telemetry.record_error(self._model, start)
@@ -93,14 +149,17 @@ class GeminiProvider(LLMProvider):
 
         start = telemetry.now()
         try:
-            response = self._client().models.generate_content(
-                model=self._model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    response_mime_type="application/json",
-                    response_schema=schema,
+            response = self._with_retry(
+                lambda: self._client().models.generate_content(
+                    model=self._model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        response_mime_type="application/json",
+                        response_schema=schema,
+                    ),
                 ),
+                what="generate_structured",
             )
         except Exception:
             telemetry.record_error(self._model, start)
@@ -124,10 +183,13 @@ class GeminiProvider(LLMProvider):
             # output_dimensionality must be sent explicitly: gemini-embedding-001
             # defaults to 3072, which would not fit historical_chunks.embedding
             # (vector(768)) and fails the insert.
-            result = self._client().models.embed_content(
-                model=self._embed_model,
-                contents=texts,
-                config=types.EmbedContentConfig(output_dimensionality=self._embed_dim),
+            result = self._with_retry(
+                lambda: self._client().models.embed_content(
+                    model=self._embed_model,
+                    contents=texts,
+                    config=types.EmbedContentConfig(output_dimensionality=self._embed_dim),
+                ),
+                what="embed",
             )
         except Exception:
             telemetry.record_error(self._embed_model, start)

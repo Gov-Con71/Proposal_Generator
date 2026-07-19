@@ -7,7 +7,7 @@ Turns an RFP's extracted compliance matrix into a full set of drafted
         (draft_section → check_compliance → [revise ↺ | save_section]) → END
 
 Loading and planning run once up front; each planned section is then drafted by
-its own bounded LangGraph subgraph, and up to `_MAX_CONCURRENCY` sections draft
+its own bounded LangGraph subgraph, and up to `settings.draft_max_concurrency` sections draft
 in parallel (they are independent). Each section is grounded in the tenant's
 past-performance context via the RAG retriever (`generate_section_draft`),
 reviewed by a compliance critic that can send it back for up to `_MAX_ATTEMPTS`
@@ -25,10 +25,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.core.config import settings
 from app.services import document_service as docs
 from app.services.draft_writer import generate_section_draft
 from app.services.guardrails import DraftGuardrailError
 from app.services.llm import get_llm
+from app.services.retrieval import tenant_history_count
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +58,9 @@ _RECURSION_LIMIT = 50
 # Total draft attempts per section (1 initial + up to 2 critic-driven revisions).
 _MAX_ATTEMPTS = 3
 
-# How many sections draft concurrently. Sections are independent, so we fan out —
-# but each fires up to _MAX_ATTEMPTS LLM calls, so this bounds concurrent Gemini
-# requests to keep clear of provider rate limits.
-_MAX_CONCURRENCY = 4
+# How many sections draft concurrently is configurable (settings.draft_max_concurrency):
+# sections are independent so we fan out, but each fires several LLM calls, so the
+# cap bounds concurrent provider requests to stay clear of per-minute rate limits.
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +100,7 @@ class DraftingState(TypedDict):
     rfp_id: str
     uploaded_by: str
     section: dict                 # one resolved section (title/brief/requirement_ids/texts/content)
+    sol_context: Optional[str]    # document-level framing from the solicitation summary
     attempts: int                 # draft attempts spent on this section
     feedback: Optional[str]       # critic feedback to fold into the next attempt
     section_id: Optional[str]     # id of the persisted section, set by save_section
@@ -108,16 +110,40 @@ class DraftingState(TypedDict):
 # Loading + planning (run once, up front)
 # ---------------------------------------------------------------------------
 
-def _load_context(rfp_id: UUID) -> tuple[str, list[dict]]:
-    """Loads the document owner + its extracted requirements."""
+def _load_context(rfp_id: UUID) -> tuple[str, list[dict], Optional[dict]]:
+    """Loads the document owner, its extracted requirements, and (if present) the
+    extracted solicitation summary that frames the whole opportunity."""
     document = docs.get_document(rfp_id)
     requirements = docs.get_requirements(rfp_id)
     if not requirements:
         raise RuntimeError(
             f"No extracted requirements for rfp {rfp_id}; run ingestion first."
         )
+    summary = docs.get_solicitation_summary(rfp_id)
     logger.info("drafting: loaded %d requirement(s) for rfp %s", len(requirements), rfp_id)
-    return str(document["uploaded_by"]), requirements
+    return str(document["uploaded_by"]), requirements, summary
+
+
+def _format_solicitation_context(summary: Optional[dict]) -> Optional[str]:
+    """Condenses the solicitation summary into a short framing block for the
+    drafting prompts. Returns None when nothing usable was extracted."""
+    if not summary:
+        return None
+
+    def _value(section: str, field: str) -> Optional[str]:
+        node = (summary.get(section) or {}).get(field)
+        return node.get("value") if isinstance(node, dict) else None
+
+    fields = [
+        ("Opportunity", _value("administrative", "title_of_opportunity")),
+        ("Agency", _value("administrative", "agency_or_organization")),
+        ("Solicitation #", _value("administrative", "solicitation_number")),
+        ("NAICS", _value("administrative", "naics_code")),
+        ("Set-aside", _value("administrative", "set_aside_type")),
+        ("Primary objective", _value("technical_core", "primary_objective")),
+    ]
+    lines = [f"- {label}: {value}" for label, value in fields if value]
+    return "\n".join(lines) if lines else None
 
 
 def _call_planner(listing: str) -> ProposalOutline:
@@ -182,6 +208,7 @@ def _draft_section_node(state: DraftingState) -> DraftingState:
             section_title=section["title"],
             requirement_texts=requirement_texts,
             feedback=state.get("feedback"),
+            solicitation_context=state.get("sol_context"),
         )
         content = result["content"]
     except DraftGuardrailError as exc:
@@ -308,28 +335,40 @@ async def run_drafting(rfp_id: UUID) -> dict:
     """Drafts a full proposal for one RFP. Returns a summary of saved sections.
 
     Loads + plans once, then fans out over sections with bounded concurrency
-    (`_MAX_CONCURRENCY`). Tracks progress on rfp_documents.processing_status as a
+    (`settings.draft_max_concurrency`). Tracks progress on rfp_documents.processing_status as a
     post-ingestion lifecycle phase: 'drafting' → 'drafted' (or 'draft_failed').
     """
     rfp = UUID(str(rfp_id))
     docs.update_status(rfp, "drafting")
     try:
         # Loading + planning are blocking (DB + one LLM call); run off the loop.
-        uploaded_by, requirements = await asyncio.to_thread(_load_context, rfp)
+        uploaded_by, requirements, summary = await asyncio.to_thread(_load_context, rfp)
         outline = await asyncio.to_thread(_plan_outline, rfp, requirements)
+        sol_context = _format_solicitation_context(summary)
+
+        # Clear signal when the tenant has no past-performance to retrieve against:
+        # every section will be ungrounded (generic) rather than silently so.
+        grounded = await asyncio.to_thread(tenant_history_count, UUID(uploaded_by)) > 0
+        if not grounded:
+            logger.warning(
+                "drafting rfp=%s: tenant has no past-performance (historical_chunks "
+                "empty) — drafts will be ungrounded. Ingest past performance to ground them.",
+                rfp,
+            )
 
         # Compile the graph once, up front — off the fan-out — so the langgraph
         # import + compile isn't paid inside (and raced by) the first wave of
         # concurrent section invokes.
         await asyncio.to_thread(_get_graph)
 
-        semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
+        semaphore = asyncio.Semaphore(settings.draft_max_concurrency)
 
         async def _draft_one(section: dict) -> Optional[str]:
             state: DraftingState = {
                 "rfp_id": str(rfp),
                 "uploaded_by": uploaded_by,
                 "section": section,
+                "sol_context": sol_context,
                 "attempts": 0,
                 "feedback": None,
                 "section_id": None,
@@ -337,7 +376,7 @@ async def run_drafting(rfp_id: UUID) -> dict:
             async with semaphore:
                 try:
                     # LangGraph invoke is synchronous; run each section's subgraph in
-                    # a worker thread so up to _MAX_CONCURRENCY overlap their calls.
+                    # a worker thread so up to draft_max_concurrency overlap their calls.
                     final: DraftingState = await asyncio.to_thread(
                         _get_graph().invoke, state, {"recursion_limit": _RECURSION_LIMIT}
                     )
@@ -361,6 +400,7 @@ async def run_drafting(rfp_id: UUID) -> dict:
         "rfp_id": str(rfp),
         "sections": len(saved),
         "section_ids": saved,
+        "grounded": grounded,
     }
 
 

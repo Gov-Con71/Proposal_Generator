@@ -39,6 +39,18 @@ class Settings(BaseSettings):
     max_extraction_chars: int = Field(
         default=600_000, validation_alias="MAX_EXTRACTION_CHARS"
     )
+    # Retry a rate-limited/unavailable LLM call (HTTP 429/503) instead of failing
+    # it outright — the drafting agent bursts many calls and would otherwise leave
+    # empty sections when it briefly exceeds the provider's per-minute quota.
+    llm_max_retries: int = Field(default=5, validation_alias="LLM_MAX_RETRIES")
+    llm_retry_base_seconds: float = Field(
+        default=2.0, validation_alias="LLM_RETRY_BASE_SECONDS"
+    )
+    # How many proposal sections draft concurrently. Higher is faster but bursts
+    # more concurrent LLM calls — keep low on a constrained/free provider quota.
+    draft_max_concurrency: int = Field(
+        default=3, validation_alias="DRAFT_MAX_CONCURRENCY"
+    )
 
     # --- S3 / object storage (Story 2.2) ---
     use_localstack: bool = Field(default=True, validation_alias="USE_LOCALSTACK")

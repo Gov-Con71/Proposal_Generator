@@ -54,6 +54,7 @@ def _assemble_section_prompt(
     requirement_texts: list[str],
     context: list[dict],
     feedback: str | None = None,
+    solicitation_context: str | None = None,
 ) -> str:
     reqs = "\n".join(f"  {i + 1}. {t}" for i, t in enumerate(requirement_texts))
     if context:
@@ -63,6 +64,9 @@ def _assemble_section_prompt(
         )
     else:
         blocks = "(no matching past-performance context found)"
+    # Document-level framing from the solicitation summary (agency, objective, …),
+    # so the section reads as a response to this specific opportunity.
+    sol = f"SOLICITATION CONTEXT:\n{solicitation_context}\n\n" if solicitation_context else ""
     # On a revision, fold the compliance critic's feedback into the instruction.
     revision = (
         f"\n\nA prior draft was reviewed and found lacking. Address this feedback "
@@ -71,6 +75,7 @@ def _assemble_section_prompt(
         else ""
     )
     return (
+        f"{sol}"
         f"PROPOSAL SECTION: {section_title}\n\n"
         f"REQUIREMENTS THIS SECTION MUST SATISFY:\n{reqs}\n\n"
         f"PAST-PERFORMANCE CONTEXT:\n{blocks}"
@@ -85,17 +90,28 @@ def generate_section_draft(
     requirement_texts: list[str],
     top_k: int = 5,
     feedback: str | None = None,
+    solicitation_context: str | None = None,
 ) -> dict:
     """Drafts a single proposal section grounded in the tenant's context.
 
     Like `generate_draft`, but writes one cohesive section covering several
     requirements at once — the unit the drafting agent persists. Pass `feedback`
-    from the compliance critic to steer a revision.
+    from the compliance critic to steer a revision, and `solicitation_context`
+    (from the extracted solicitation summary) to frame the section for this RFP.
     """
     # Retrieve against the section's combined intent (title + its requirements).
     query = section_title + "\n" + "\n".join(requirement_texts)
     context = search_similar(uploaded_by, query, top_k=top_k)
-    prompt = _assemble_section_prompt(section_title, requirement_texts, context, feedback)
+    if not context:
+        # Clear signal: with no past-performance the draft is ungrounded (generic).
+        logger.warning(
+            "generate_section_draft: '%s' has no past-performance context "
+            "(historical_chunks empty for tenant?) — draft will be ungrounded.",
+            section_title,
+        )
+    prompt = _assemble_section_prompt(
+        section_title, requirement_texts, context, feedback, solicitation_context
+    )
 
     text = get_llm().generate_text(prompt, system=_SECTION_SYSTEM_PROMPT)
     draft = validate_draft(text)
@@ -107,6 +123,7 @@ def generate_section_draft(
     )
     return {
         "content": draft,
+        "grounded": bool(context),
         "citations": [
             {"source_name": c["source_name"], "score": c["score"]} for c in context
         ],

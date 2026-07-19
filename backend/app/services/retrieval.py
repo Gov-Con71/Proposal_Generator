@@ -24,6 +24,23 @@ def _vector_literal(vec: list[float]) -> str:
     return "[" + ",".join(map(str, vec)) + "]"
 
 
+def tenant_history_count(uploaded_by: UUID) -> int:
+    """Number of past-performance chunks the tenant has. Zero means drafts for
+    this tenant cannot be grounded in retrieval (they will be generic)."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM historical_chunks "
+                "WHERE uploaded_by = %s AND embedding IS NOT NULL;",
+                (str(uploaded_by),),
+            )
+            (count,) = cur.fetchone()
+    finally:
+        conn.close()
+    return count
+
+
 def search_similar(uploaded_by: UUID, query: str, top_k: int = 5) -> list[dict]:
     """Returns the top_k most similar historical chunks for the tenant.
 
