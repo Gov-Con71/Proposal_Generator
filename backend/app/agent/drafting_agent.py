@@ -35,12 +35,20 @@ from app.services.retrieval import tenant_history_count
 logger = logging.getLogger(__name__)
 
 _OUTLINE_SYSTEM_PROMPT = (
-    "You are a lead proposal manager. Group the RFP's compliance requirements "
-    "into a logical set of proposal sections (e.g. Technical Approach, Management "
-    "Plan, Past Performance, Security). Assign every requirement to exactly one "
-    "section by its reference number. For each section, give a short brief of what "
-    "it must cover. Do not invent requirements; only use the reference numbers "
-    "provided."
+    "You are a lead proposal manager building a proposal's section outline. Group "
+    "the RFP's compliance requirements into MULTIPLE focused proposal sections, "
+    "each covering ONE distinct subject-matter theme (e.g. Packaging & "
+    "Preservation, Marking & Labeling, Quality Assurance, Security, Past "
+    "Performance). "
+    "Create a separate section for every major theme present in the requirements — "
+    "for a substantial RFP this is typically 4-8 sections. Do NOT collapse "
+    "unrelated requirements into a single broad catch-all section (e.g. one giant "
+    "'Technical Approach'); split by subject so each section is narrow enough to "
+    "write and review on its own, and only combine requirements that genuinely "
+    "share a topic. "
+    "Assign every requirement to exactly one section by its reference number. For "
+    "each section, give a short brief of what it must cover. Do not invent "
+    "requirements; only use the reference numbers provided."
 )
 _CRITIC_SYSTEM_PROMPT = (
     "You are a government-contracts compliance reviewer. Given a proposal section "

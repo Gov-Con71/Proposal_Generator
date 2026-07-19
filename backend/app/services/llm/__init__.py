@@ -37,6 +37,17 @@ def _build_provider() -> LLMProvider:
             max_retries=settings.llm_max_retries,
             retry_base_seconds=settings.llm_retry_base_seconds,
         )
+    if name == "featherless":
+        from app.services.llm.featherless import FeatherlessProvider
+
+        return FeatherlessProvider(
+            model=settings.llm_model,
+            embed_model=settings.embedding_model,
+            embed_dim=_EMBEDDING_DIM,
+            request_timeout_ms=settings.llm_request_timeout_seconds * 1000,
+            max_retries=settings.llm_max_retries,
+            retry_base_seconds=settings.llm_retry_base_seconds,
+        )
     raise ValueError(
         f"Unknown LLM_PROVIDER '{settings.llm_provider}'. Implement an LLMProvider "
         "adapter and register it in app/services/llm/__init__.py."

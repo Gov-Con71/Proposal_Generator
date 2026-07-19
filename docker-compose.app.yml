@@ -91,6 +91,7 @@ services:
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
       - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-30}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - FEATHERLESS_API_KEY=${FEATHERLESS_API_KEY:-}
       - SENTRY_DSN=${SENTRY_DSN:-}
     depends_on:
       db:
@@ -129,6 +130,7 @@ services:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-gemini-embedding-001}
       # GEMINI_API_KEY must be provided via .env for extraction/drafting.
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - FEATHERLESS_API_KEY=${FEATHERLESS_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy

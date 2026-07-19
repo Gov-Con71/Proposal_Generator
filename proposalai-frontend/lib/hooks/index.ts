@@ -237,6 +237,47 @@ export function useGenerateSection(proposalId: string) {
   })
 }
 
+/** Drives the full drafting agent imperatively: POST /documents/{rfpId}/draft →
+ *  poll the document status until 'drafted' → refresh the sections list.
+ *
+ *  Drafting is many LLM calls (plan → per-section draft + compliance critique),
+ *  so it can take minutes on a constrained provider quota — hence the generous
+ *  poll cap. `rfpId` triggers/polls; `proposalId` keys the sections cache to
+ *  invalidate so the drafted sections appear. */
+export function useGenerateDraft(rfpId: string, proposalId: string) {
+  const qc = useQueryClient()
+  const [status, setStatus] = useState<'idle' | 'drafting' | 'failed'>('idle')
+  const [error, setError] = useState<string | null>(null)
+
+  async function generate() {
+    if (!isValidId(rfpId)) return
+    setError(null)
+    setStatus('drafting')
+    try {
+      await documentsApi.draft(rfpId)
+      // Poll until the worker finishes ('drafted') or fails ('draft_failed').
+      const startedAt = Date.now()
+      let doc = await documentsApi.status(rfpId)
+      while (doc.processingStatus === 'drafting') {
+        if (Date.now() - startedAt > 15 * 60_000) {
+          throw new Error('Drafting timed out — please try again.')
+        }
+        await new Promise((r) => setTimeout(r, 3000))
+        doc = await documentsApi.status(rfpId)
+      }
+      if (doc.processingStatus === 'draft_failed') throw new Error('Draft generation failed.')
+      qc.invalidateQueries({ queryKey: ['sections', proposalId] })
+      setStatus('idle')
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } }; message?: string }
+      setError(err.response?.data?.detail || err.message || 'Draft generation failed.')
+      setStatus('failed')
+    }
+  }
+
+  return { generate, status, error }
+}
+
 export function useSaveSection(proposalId: string) {
   const qc = useQueryClient()
   return useMutation({

@@ -86,6 +86,7 @@ services:
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
       - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-30}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - FEATHERLESS_API_KEY=${FEATHERLESS_API_KEY:-}
       - SENTRY_DSN=${SENTRY_DSN:-}
     depends_on:
       db:
@@ -121,6 +122,7 @@ services:
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
       # GEMINI_API_KEY must be provided via .env for extraction.
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - FEATHERLESS_API_KEY=${FEATHERLESS_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy

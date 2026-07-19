@@ -91,6 +91,13 @@ export const documentsApi = {
   status: (rfpId: string) =>
     apiClient.get<DocumentStatus>(`/documents/${rfpId}`).then((r) => r.data),
 
+  // Kick off the full drafting agent (POST /documents/{rfpId}/draft). Queues the
+  // worker and returns the document with processingStatus 'drafting'; poll
+  // status() until it becomes 'drafted' (or 'draft_failed'). 409 if the RFP has
+  // no extracted requirements yet.
+  draft: (rfpId: string) =>
+    apiClient.post<DocumentStatus>(`/documents/${rfpId}/draft`).then((r) => r.data),
+
   // Read the extracted solicitation summary (GET /documents/{rfpId}/summary).
   // Supplementary/best-effort: the server returns 404 until it exists, so a
   // polling caller should treat a 404 as "not ready yet" rather than an error.

@@ -16,6 +16,9 @@ class Settings(BaseSettings):
 
     # --- LLM provider (decoupled via app/services/llm) ---
     # Swap AI platforms by changing llm_provider + implementing an adapter.
+    # "gemini" (default) or "featherless". For featherless, also set LLM_MODEL to a
+    # chat model id (e.g. Qwen/Qwen2.5-72B-Instruct), EMBEDDING_MODEL to an
+    # embedding model (e.g. Qwen/Qwen3-Embedding-8B), and FEATHERLESS_API_KEY.
     llm_provider: str = Field(default="gemini", validation_alias="LLM_PROVIDER")
     # gemini-2.0-flash is listed by the API but serves 429 with `limit: 0` — it
     # carries no free-tier request quota, which stalled the whole ingestion
