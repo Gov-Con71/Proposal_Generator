@@ -52,6 +52,7 @@ def _null_summary() -> SolicitationSummary:
             page_limits=[], required_volumes_or_sections=[],
         ),
         technical_core=TechnicalCore(primary_objective=c(), key_deliverables=[]),
+        evaluation_factors=[], instructions_to_offerors=[],
     )
 
 
@@ -176,13 +177,27 @@ def test_upload_to_requirements_end_to_end(test_client, seeded_user, monkeypatch
     # --- Sprint 8: the solicitation summary was extracted and stored as JSONB ---
     summary = _fetch_summary(rfp_id)
     assert summary is not None
-    assert set(summary) == {"administrative", "deadlines", "submission_requirements", "technical_core"}
+    assert set(summary) == {
+        "administrative",
+        "deadlines",
+        "submission_requirements",
+        "technical_core",
+        "evaluation_factors",
+        "instructions_to_offerors",
+    }
 
     # --- Sprint 8: the summary is readable via the API in its snake_case schema ---
     sum_resp = test_client.get(f"/documents/{rfp_id}/summary", headers=auth)
     assert sum_resp.status_code == 200, sum_resp.text
     body = sum_resp.json()
-    assert set(body) == {"administrative", "deadlines", "submission_requirements", "technical_core"}
+    assert set(body) == {
+        "administrative",
+        "deadlines",
+        "submission_requirements",
+        "technical_core",
+        "evaluation_factors",
+        "instructions_to_offerors",
+    }
     # snake_case citation shape is preserved verbatim (not camelCased)
     assert body["administrative"]["solicitation_number"] == {"value": None, "source_quote": None}
     # unknown / cross-tenant document is a 404, not a leak

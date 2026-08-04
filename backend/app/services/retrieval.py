@@ -41,10 +41,18 @@ def tenant_history_count(uploaded_by: UUID) -> int:
     return count
 
 
-def search_similar(uploaded_by: UUID, query: str, top_k: int = 5) -> list[dict]:
+def search_similar(
+    uploaded_by: UUID, query: str, top_k: int = 5, min_score: float = 0.0
+) -> list[dict]:
     """Returns the top_k most similar historical chunks for the tenant.
 
     `score` is cosine similarity in [0, 1] (1 = identical direction).
+
+    `min_score` drops weak matches. Top-k alone returns whatever the tenant
+    happens to have, so a sparse corpus yields irrelevant chunks that callers
+    then present to the model as evidence — the floor makes "nothing relevant"
+    an explicit empty result instead. Defaults to 0.0, preserving the previous
+    behaviour for callers that do not opt in.
     """
     if not query.strip():
         return []
@@ -69,8 +77,7 @@ def search_similar(uploaded_by: UUID, query: str, top_k: int = 5) -> list[dict]:
     finally:
         conn.close()
 
-    logger.info("search_similar: %d hits for query (%.40s...)", len(rows), query)
-    return [
+    hits = [
         {
             "chunk_id": str(r[0]),
             "source_name": r[1],
@@ -79,3 +86,12 @@ def search_similar(uploaded_by: UUID, query: str, top_k: int = 5) -> list[dict]:
         }
         for r in rows
     ]
+    kept = [h for h in hits if h["score"] >= min_score]
+    if len(kept) < len(hits):
+        logger.info(
+            "search_similar: dropped %d hit(s) below min_score %.2f",
+            len(hits) - len(kept),
+            min_score,
+        )
+    logger.info("search_similar: %d hits for query (%.40s...)", len(kept), query)
+    return kept

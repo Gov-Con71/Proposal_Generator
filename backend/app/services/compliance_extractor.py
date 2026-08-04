@@ -10,8 +10,19 @@ _SYSTEM_PROMPT = (
     "You are a government contracting compliance analyst. "
     "Extract every hard compliance rule, deliverable, and vendor requirement "
     "from the RFP document below. For each item capture: the section number "
-    "exactly as it appears, the verbatim requirement text, and classify it as "
-    "one of: Technical, Security, or Past Performance."
+    "exactly as it appears, the verbatim requirement text, and its category.\n"
+    "Categories:\n"
+    "  Technical — what the contractor must do, build, or deliver.\n"
+    "  Security — clearances, safeguarding, cyber/CMMC, physical security.\n"
+    "  Past Performance — prior-contract experience the offeror must evidence.\n"
+    "  Instruction — Section L 'Instructions to Offerors': how the proposal must "
+    "be prepared and submitted (volume structure, page limits, format, fonts, "
+    "due dates, submission portal, required forms).\n"
+    "  Evaluation Criteria — Section M 'Evaluation Factors for Award': what the "
+    "government will score the proposal on, and the relative importance of each "
+    "factor.\n"
+    "Do not skip Sections L and M: a proposal that ignores them is non-responsive, "
+    "so extract those rules as diligently as the technical ones."
 )
 
 
@@ -19,10 +30,21 @@ _SYSTEM_PROMPT = (
 # Pydantic schemas (mirror the compliance_requirements DB table)
 # ---------------------------------------------------------------------------
 
+# `Instruction` (Section L) and `Evaluation Criteria` (Section M) are not things
+# the proposal *answers* — they govern how it is written and how it is scored, so
+# the drafting agent treats them as cross-cutting constraints rather than as
+# requirements to assign to a section. The DB column is a bare VARCHAR(100) with
+# no CHECK constraint, so widening the Literal below needs no migration.
+INSTRUCTION_CATEGORY = "Instruction"
+EVALUATION_CATEGORY = "Evaluation Criteria"
+# The categories a proposal section is written to satisfy.
+ANSWERABLE_CATEGORIES = frozenset({"Technical", "Security", "Past Performance"})
+
+
 class ExtractedRequirement(BaseModel):
     section_number: str
     raw_text_content: str
-    category: Literal["Technical", "Security", "Past Performance"]
+    category: Literal["Technical", "Security", "Past Performance", "Instruction", "Evaluation Criteria"]
 
 
 class ComplianceMatrix(BaseModel):

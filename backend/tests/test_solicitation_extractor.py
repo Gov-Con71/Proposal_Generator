@@ -10,11 +10,14 @@ import asyncio
 import pytest
 
 from app.services import solicitation_extractor as se
+from app.services.guardrails import sanitize_solicitation_summary
 from app.services.solicitation_extractor import (
     Administrative,
     Citation,
     Deadlines,
     Deliverable,
+    EvaluationFactor,
+    Instruction,
     PageLimit,
     SolicitationSummary,
     SubmissionMethod,
@@ -51,6 +54,21 @@ def _full_summary() -> SolicitationSummary:
             primary_objective=Citation(value="Maintain widgets", source_quote="Objective: maintain widgets"),
             key_deliverables=[Deliverable(title="Monthly report", description="Status report", source_quote="Deliver a monthly status report")],
         ),
+        evaluation_factors=[
+            EvaluationFactor(
+                factor="Technical Merit",
+                description="Soundness of the technical approach",
+                importance="more important than price",
+                source_quote="M.2 Technical Merit is more important than price",
+            )
+        ],
+        instructions_to_offerors=[
+            Instruction(
+                instruction="Submit Volume I in Times New Roman 12pt",
+                applies_to="Volume I",
+                source_quote="L.4 Format: Times New Roman 12pt",
+            )
+        ],
     )
 
 
@@ -61,13 +79,24 @@ def test_run_solicitation_extraction_returns_validated_summary(monkeypatch):
 
     dumped = summary.model_dump()
     # Matches the agreed output schema exactly, top to bottom.
-    assert set(dumped) == {"administrative", "deadlines", "submission_requirements", "technical_core"}
+    assert set(dumped) == {
+        "administrative",
+        "deadlines",
+        "submission_requirements",
+        "technical_core",
+        "evaluation_factors",
+        "instructions_to_offerors",
+    }
     assert dumped["administrative"]["solicitation_number"] == {
         "value": "W912-25-R-0001",
         "source_quote": "Solicitation No. W912-25-R-0001",
     }
     assert dumped["submission_requirements"]["page_limits"][0]["limit"] == "30 pages"
     assert dumped["technical_core"]["key_deliverables"][0]["title"] == "Monthly report"
+    # Sections M and L — what the proposal is scored on, and how it must be built.
+    assert dumped["evaluation_factors"][0]["factor"] == "Technical Merit"
+    assert dumped["evaluation_factors"][0]["importance"] == "more important than price"
+    assert dumped["instructions_to_offerors"][0]["applies_to"] == "Volume I"
 
 
 def test_null_and_empty_shape_round_trips(monkeypatch):
@@ -93,6 +122,8 @@ def test_null_and_empty_shape_round_trips(monkeypatch):
         technical_core=TechnicalCore(
             primary_objective=Citation(value=None, source_quote=None), key_deliverables=[]
         ),
+        evaluation_factors=[],
+        instructions_to_offerors=[],
     )
     monkeypatch.setattr(se, "_call_extractor", lambda md: empty)
 
@@ -100,9 +131,46 @@ def test_null_and_empty_shape_round_trips(monkeypatch):
     assert dumped["administrative"]["naics_code"] == {"value": None, "source_quote": None}
     assert dumped["submission_requirements"]["page_limits"] == []
     assert dumped["technical_core"]["key_deliverables"] == []
+    assert dumped["evaluation_factors"] == []
+    assert dumped["instructions_to_offerors"] == []
 
 
 def test_none_result_raises(monkeypatch):
     monkeypatch.setattr(se, "_call_extractor", lambda md: None)
     with pytest.raises(RuntimeError):
         asyncio.run(se.run_solicitation_extraction("x"))
+
+
+def test_fabricated_section_l_and_m_citations_are_dropped():
+    """The Section L/M lists inherit the existing citation check for free: their
+    items are source_quote-bearing dicts with no `value` key, the shape
+    `sanitize_solicitation_summary` drops whole when the quote isn't in the source.
+
+    This matters more here than elsewhere — an invented evaluation factor would
+    silently steer every section of the proposal at the wrong target.
+    """
+    summary = _full_summary().model_dump()
+    source = (
+        "L.4 Format: Times New Roman 12pt. "
+        "M.2 Technical Merit is more important than price"
+    )
+    # Add a factor whose citation appears nowhere in the source document.
+    summary["evaluation_factors"].append(
+        {
+            "factor": "Small Business Participation",
+            "description": "Invented factor",
+            "importance": "critical",
+            "source_quote": (
+                "M.9 Small Business Participation shall be weighted above all "
+                "other factors in this procurement"
+            ),
+        }
+    )
+
+    clean, removed = sanitize_solicitation_summary(summary, source)
+
+    assert removed == 1
+    factors = [f["factor"] for f in clean["evaluation_factors"]]
+    assert factors == ["Technical Merit"]
+    # The grounded Section L instruction is untouched.
+    assert len(clean["instructions_to_offerors"]) == 1
