@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
 from app.core.config import settings
 from app.core.deps import get_current_user_id, require_writer
@@ -82,6 +82,18 @@ def _spooled_size(upload: UploadFile) -> int:
 )
 async def upload_document(
     file: UploadFile = File(..., description="RFP file (PDF, DOCX, or TXT)."),
+    # Bid metadata the upload form collects. Sent as multipart fields alongside
+    # the file, because the request is already multipart — a JSON body would
+    # mean either a second round trip or a base64'd document. All optional: the
+    # form is a convenience, and ingestion fills in what the user leaves blank.
+    # Until now the form gathered every one of these and discarded them
+    # silently (GAP_ANALYSIS §4.2).
+    title: str = Form(""),
+    agency: str = Form(""),
+    solicitation_number: str = Form(""),
+    due_date: str = Form(""),
+    contract_type: str = Form(""),
+    naics_code: str = Form(""),
     uploaded_by: UUID = Depends(get_current_user_id),
 ) -> DocumentUploadResponse:
     # --- validate type (2.1 error-boundary contract) ---
@@ -126,11 +138,20 @@ async def upload_document(
 
     # --- create the proposal this upload is for ---
     # Uploading an RFP is how a proposal starts, so one is created here rather
-    # than leaving an orphan document the dashboard can never show. The title is
-    # a placeholder the user renames; ingestion fills in the rest.
+    # than leaving an orphan document the dashboard can never show. Whatever the
+    # user typed on the upload form wins; the filename is only a fallback title,
+    # and ingestion fills the rest in from the document.
     proposal = proposals.create_proposal(
         uploaded_by,
-        ProposalCreate(title=Path(safe_name).stem, document_id=str(created_id)),
+        ProposalCreate(
+            title=title.strip() or Path(safe_name).stem,
+            agency=agency.strip(),
+            solicitation_number=solicitation_number.strip(),
+            due_date=due_date.strip(),
+            contract_type=contract_type.strip(),
+            naics_code=naics_code.strip(),
+            document_id=str(created_id),
+        ),
     )
 
     # --- hand off to the async worker queue (by name; worker owns the LLM stack) ---

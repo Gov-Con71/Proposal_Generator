@@ -77,6 +77,18 @@ export interface DocumentStatus {
   failureReason?: string | null
 }
 
+/** Bid metadata the upload form collects, applied to the proposal the upload
+ *  creates. Keys are the snake_case multipart field names the endpoint expects
+ *  (multipart fields are not camel-converted the way JSON bodies are). */
+export interface UploadMeta {
+  title?: string
+  agency?: string
+  solicitation_number?: string
+  due_date?: string
+  contract_type?: string
+  naics_code?: string
+}
+
 /** Response from POST /proposals/{proposalId}/draft. */
 export interface DraftQueued {
   proposalId: string
@@ -88,9 +100,18 @@ export interface DraftQueued {
 export const documentsApi = {
   // Streams the file to POST /documents/upload. The tenant is derived from the
   // JWT the axios client attaches — no user id in the body.
-  upload: (file: File, onProgress?: (pct: number) => void) => {
+  upload: (file: File, onProgress?: (pct: number) => void, meta?: UploadMeta) => {
     const form = new FormData()
     form.append('file', file)
+    // Bid metadata from the upload form. Sent as multipart fields beside the
+    // file; the server applies whatever is filled in to the proposal it creates
+    // and leaves the rest to ingestion. Empty values are omitted rather than
+    // sent as '' so they cannot overwrite anything extraction later derives.
+    if (meta) {
+      for (const [key, value] of Object.entries(meta)) {
+        if (value) form.append(key, value)
+      }
+    }
     return apiClient.post<UploadResult>('/documents/upload', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: (e) => {

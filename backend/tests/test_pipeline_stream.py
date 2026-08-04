@@ -68,11 +68,17 @@ def _seed_document(user_id: str, status: str, requirements: int = 0) -> str:
     return proposal_id
 
 
-def _events(test_client, url: str) -> list[dict]:
+def _raw_lines(test_client, url: str) -> list[str]:
     with test_client.stream("GET", url) as resp:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
-        return [json.loads(line[6:]) for line in resp.iter_lines() if line.startswith("data:")]
+        return list(resp.iter_lines())
+
+
+def _events(test_client, url: str) -> list[dict]:
+    return [
+        json.loads(line[6:]) for line in _raw_lines(test_client, url) if line.startswith("data:")
+    ]
 
 
 def test_stream_reflects_completed_status(test_client, seeded_user):
@@ -97,6 +103,30 @@ def test_stream_reflects_failed_status(test_client, seeded_user):
     final = _events(test_client, f"/proposals/{proposal_id}/pipeline/stream?token={token}")[-1]
     assert final["status"] == "failed"
     assert final["statusMessage"] == "Processing failed."
+
+
+def test_stream_that_outlives_its_budget_says_so(test_client, seeded_user, monkeypatch):
+    """A document still working when the poll budget runs out must get an
+    explicit closing frame. Returning silently closed the response with no
+    explanation, and the client could not tell a slow ingestion from a dead
+    server — the failure this stream exists to report accurately."""
+    from app.api.v1 import pipeline as pipeline_api
+
+    monkeypatch.setattr(pipeline_api, "_MAX_POLLS", 3)
+    monkeypatch.setattr(pipeline_api, "_POLL_SECONDS", 0.01)
+
+    proposal_id = _seed_document(seeded_user, "extracting")
+    token, _ = create_access_token(seeded_user)
+
+    lines = _raw_lines(test_client, f"/proposals/{proposal_id}/pipeline/stream?token={token}")
+    events = [json.loads(line[6:]) for line in lines if line.startswith("data:")]
+
+    final = events[-1]
+    assert final["status"] == "running"  # the ingestion is still going; only we gave up
+    assert "taking longer than usual" in final["statusMessage"]
+    # polls after the first produce no state change, so they must still put
+    # bytes on the wire or an idle proxy drops the connection mid-extraction
+    assert any(line.startswith(":") for line in lines), "expected a heartbeat comment"
 
 
 def test_stream_unknown_proposal_is_rejected(test_client, seeded_user):

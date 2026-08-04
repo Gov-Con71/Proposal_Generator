@@ -128,10 +128,15 @@ const IDLE_PIPELINE: Pipeline = {
   startedAt: '',
 }
 
+/** Consecutive failed reconnects before the drop is called fatal. The browser
+ *  retries on its own roughly every 3s, so this is ~15s of a dead server. */
+const MAX_RECONNECTS = 5
+
 export function useProcessing(proposalId: string, onComplete?: () => void) {
   const [pipeline, setPipeline] = useState<Pipeline>(IDLE_PIPELINE)
   const [connectionError, setConnectionError] = useState(false)
   const esRef = useRef<EventSource | null>(null)
+  const retriesRef = useRef(0)
 
   // Keep the latest callback without making it an effect dependency — otherwise
   // an inline arrow from the caller would tear down the stream on every render.
@@ -143,6 +148,7 @@ export function useProcessing(proposalId: string, onComplete?: () => void) {
 
     setPipeline(IDLE_PIPELINE)
     setConnectionError(false)
+    retriesRef.current = 0
 
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
     // EventSource can't set an Authorization header, so pass the JWT as a query
@@ -157,6 +163,7 @@ export function useProcessing(proposalId: string, onComplete?: () => void) {
         const data: Pipeline = JSON.parse(e.data)
         setPipeline(data)
         setConnectionError(false)
+        retriesRef.current = 0  // a frame arrived: the stream is healthy again
         if (data.status === 'completed') {
           es.close()
           onCompleteRef.current?.()
@@ -166,10 +173,25 @@ export function useProcessing(proposalId: string, onComplete?: () => void) {
       }
     }
 
-    // Surface the dropped stream instead of hanging on a stale progress bar.
+    // EventSource fires `error` for *any* interruption, including the routine
+    // reconnect it performs after a clean stream end — and the server caps how
+    // long a single connection streams. Treating every error as fatal stranded
+    // the page on an error screen for ingestions that were still running and
+    // went on to succeed, with the browser's own recovery closed off.
     es.onerror = () => {
-      setConnectionError(true)
-      es.close()
+      // CLOSED means the browser gave up and will not retry (an HTTP error
+      // response such as 401/404/409). Genuinely fatal — say so.
+      if (es.readyState === EventSource.CLOSED) {
+        setConnectionError(true)
+        return
+      }
+      // Otherwise CONNECTING: a retry is already in flight. Let it run, but
+      // don't spin silently forever against a server that is actually down.
+      retriesRef.current += 1
+      if (retriesRef.current > MAX_RECONNECTS) {
+        setConnectionError(true)
+        es.close()
+      }
     }
 
     return () => {

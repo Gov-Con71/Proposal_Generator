@@ -35,9 +35,9 @@ export default function UploadPage() {
   const [uploading, setUploading] = useState(false)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
-  // NOTE: this metadata is not submitted yet — POST /documents/upload takes the
-  // file only, and the title/agency/solicitation are parsed from the document
-  // during ingestion. Wiring these through needs a backend contract change.
+  // Submitted with the file as multipart fields; the server applies them to the
+  // proposal it creates. Anything left blank is filled in from the document
+  // during ingestion.
   const [form, setForm] = useState({
     title: '',
     agency: '',
@@ -86,7 +86,14 @@ export default function UploadPage() {
     setUploading(true)
     setProgress(0)
     try {
-      const res = await documentsApi.upload(file, setProgress)
+      const res = await documentsApi.upload(file, setProgress, {
+        title: form.title,
+        agency: form.agency,
+        solicitation_number: form.solicitationNumber,
+        due_date: form.deadline,
+        contract_type: form.contractType,
+        naics_code: form.naicsCode,
+      })
       // Guard the handoff: without an id the next step would stream against
       // /proposals/undefined/… and 422 on every poll.
       if (!res.proposalId) {

@@ -210,6 +210,48 @@ def test_upload_to_requirements_end_to_end(test_client, seeded_user, monkeypatch
 
 
 @mock_aws
+def test_upload_persists_the_metadata_form(test_client, seeded_user, monkeypatch):
+    """The upload form's bid metadata reaches the proposal it creates.
+
+    Every one of these fields was collected by the UI and silently dropped —
+    the endpoint took the file alone (GAP_ANALYSIS §4.2).
+    """
+    # S3Storage provisions the bucket itself; moto intercepts it.
+    monkeypatch.setattr(settings, "use_localstack", False)
+
+    from app.api.v1 import documents as documents_mod
+
+    monkeypatch.setattr(
+        documents_mod.celery_app, "send_task", lambda name, args=None, **kw: None
+    )
+    token, _ = create_access_token(seeded_user)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    resp = test_client.post(
+        "/documents/upload",
+        files={"file": ("rfp.txt", b"SHALL do the thing.", "text/plain")},
+        data={
+            "title": "Pump Overhaul Bid",
+            "agency": "Defense Logistics Agency",
+            "solicitation_number": "SPE8EC-26-R-0042",
+            "due_date": "2026-09-30",
+            "contract_type": "ffp",
+            "naics_code": "336413",
+        },
+        headers=auth,
+    )
+    assert resp.status_code == 202, resp.text
+
+    proposal = test_client.get(f"/proposals/{resp.json()['proposalId']}", headers=auth).json()
+    assert proposal["title"] == "Pump Overhaul Bid"
+    assert proposal["agency"] == "Defense Logistics Agency"
+    assert proposal["solicitationNumber"] == "SPE8EC-26-R-0042"
+    assert proposal["dueDate"] == "2026-09-30"
+    assert proposal["contractType"] == "ffp"
+    assert proposal["naicsCode"] == "336413"
+
+
+@mock_aws
 def test_failed_ingestion_records_why(test_client, seeded_user, monkeypatch):
     """A failed document carries a readable reason, not just the word 'failed'.
 

@@ -58,7 +58,15 @@ _STATUS_MAP = {
 }
 
 _POLL_SECONDS = 1.0
-_MAX_POLLS = 150  # ~2.5 min safety cap so a stuck document can't stream forever
+# ~10 min. The old 2.5 min cap was shorter than a real ingestion: a throttled
+# provider (429 backoff) plus a single multi-minute extraction call routinely
+# runs 3-5 min, so the stream died *before* the work finished and the client
+# reported a lost connection for a run that went on to succeed.
+_MAX_POLLS = 600
+# Sent on every poll that produces no state change. Without bytes on the wire a
+# proxy (or a laptop suspending its sockets) idles the connection out during the
+# long extraction step, which reads to the client as a dropped stream.
+_HEARTBEAT = ": ping\n\n"
 
 
 def _now() -> str:
@@ -74,9 +82,20 @@ def _read_state(rfp_id: str) -> tuple[str | None, int, str | None]:
     return document["processing_status"], docs.count_requirements(UUID(rfp_id)), str(document["uploaded_by"])
 
 
-def _snapshot(proposal_id: str, started_at: str, doc_status: str, count: int) -> Pipeline:
+def _snapshot(
+    proposal_id: str,
+    started_at: str,
+    doc_status: str,
+    count: int,
+    step_completed_at: dict[str, str],
+) -> Pipeline:
     """Builds the frame the client sees. `proposal_id` is what it addressed; the
-    status behind it was read from the linked document."""
+    status behind it was read from the linked document.
+
+    `step_completed_at` carries each step's first-seen completion time across
+    polls and is filled in as steps finish. Stamping `_now()` on every poll
+    instead made each completed step's timestamp jitter by a second and left no
+    two snapshots ever equal, which defeated the caller's change detection."""
     completed_index, failed = _STATUS_MAP.get(doc_status, (0, False))
 
     steps: list[PipelineStep] = []
@@ -95,7 +114,11 @@ def _snapshot(proposal_id: str, started_at: str, doc_status: str, count: int) ->
                 label=label,
                 description=desc,
                 status=step_status,
-                completed_at=_now() if step_status == "completed" else None,
+                completed_at=(
+                    step_completed_at.setdefault(sid, _now())
+                    if step_status == "completed"
+                    else None
+                ),
                 meta=f"{count} requirements" if sid == "extract" and count else None,
             )
         )
@@ -125,6 +148,8 @@ async def _event_stream(rfp_id: str, proposal_id: str, user_id: str):
     client addressed, so the frame echoes the id it asked about."""
     started_at = _now()
     last_payload: str | None = None
+    last_pipe: Pipeline | None = None
+    step_completed_at: dict[str, str] = {}
 
     for _ in range(_MAX_POLLS):
         doc_status, count, owner = await asyncio.to_thread(_read_state, rfp_id)
@@ -140,15 +165,33 @@ async def _event_stream(rfp_id: str, proposal_id: str, user_id: str):
             yield f"data: {pipe.model_dump_json(by_alias=True)}\n\n"
             return
 
-        pipe = _snapshot(proposal_id, started_at, doc_status, count)
-        payload = pipe.model_dump_json(by_alias=True)
+        last_pipe = _snapshot(proposal_id, started_at, doc_status, count, step_completed_at)
+        payload = last_pipe.model_dump_json(by_alias=True)
         if payload != last_payload:  # only push on change (plus the terminal frame)
             yield f"data: {payload}\n\n"
             last_payload = payload
+        else:
+            yield _HEARTBEAT
 
-        if pipe.status in ("completed", "failed"):
+        if last_pipe.status in ("completed", "failed"):
             return
         await asyncio.sleep(_POLL_SECONDS)
+
+    # Budget exhausted with the document still working. Say so explicitly: a
+    # silent `return` here closed the response with no explanation, leaving the
+    # client unable to tell a still-running ingestion from a crashed server.
+    # The run status stays "running" because that is the truth — only this
+    # connection is giving up, not the ingestion.
+    if last_pipe is not None:
+        timed_out = last_pipe.model_copy(
+            update={
+                "status_message": (
+                    "Still processing — this is taking longer than usual. "
+                    "Progress is preserved; the workspace will show the result when it lands."
+                )
+            }
+        )
+        yield f"data: {timed_out.model_dump_json(by_alias=True)}\n\n"
 
 
 @router.get("/proposals/{proposal_id}/pipeline/stream")
