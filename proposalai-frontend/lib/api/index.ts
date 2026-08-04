@@ -93,7 +93,8 @@ export interface UploadMeta {
 export interface DraftQueued {
   proposalId: string
   rfpId: string
-  processingStatus: string
+  /** The proposal's own drafting lifecycle — always 'drafting' here. */
+  draftingStatus: string
   requirementsCount: number
 }
 
@@ -127,8 +128,11 @@ export const documentsApi = {
   // Kick off the full drafting agent (POST /proposals/{proposalId}/draft).
   // Addressed by proposal, not document: drafting writes that proposal's own
   // sections, and one RFP can back several proposals. Queues the worker and
-  // returns processingStatus 'drafting'; poll status(rfpId) until it becomes
-  // 'drafted' (or 'draft_failed'). 409 if the RFP has no requirements yet.
+  // returns draftingStatus 'drafting'; poll proposalsApi.get(proposalId) until
+  // its draftingStatus becomes 'drafted' (or 'draft_failed'). Polling the
+  // *document* would report whichever bid on that RFP wrote last — the flag
+  // moved onto the proposal in migration 0005.
+  // 409 if the RFP has no requirements yet.
   draft: (proposalId: string) =>
     apiClient.post<DraftQueued>(`/proposals/${proposalId}/draft`).then((r) => r.data),
 

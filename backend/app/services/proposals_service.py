@@ -43,8 +43,12 @@ _COLS = (
     "proposal_id, owned_by, rfp_id, title, solicitation_number, agency, due_date, "
     "compliance_score, status, contract_type, naics_code, naics_description, "
     "pricing_model, target_profit_margin, drafting_level, tone, page_limit, "
-    "created_at, updated_at"
+    "drafting_status, drafting_failure_reason, created_at, updated_at"
 )
+
+# States of the AI writer for one proposal. Deliberately not in `_WRITABLE`:
+# this is the agent's to advance, not the client's to assert.
+DRAFTING_STATUSES = ("idle", "drafting", "drafted", "draft_failed")
 
 
 def _fetchone(sql: str, params: tuple) -> dict | None:
@@ -128,6 +132,8 @@ def _to_proposal(row: dict, counts: dict) -> Proposal:
         tone=row["tone"],
         page_limit=row["page_limit"],
         document_id=str(row["rfp_id"]) if row.get("rfp_id") else "",
+        drafting_status=row.get("drafting_status") or "idle",
+        drafting_failure_reason=row.get("drafting_failure_reason"),
         total_requirements=counts["total"],
         addressed_requirements=counts["addressed"],
         partial_requirements=counts["partial"],
@@ -216,6 +222,40 @@ def rfp_for_proposal_unscoped(proposal_id: UUID) -> UUID:
     if row["rfp_id"] is None:
         raise NoLinkedDocumentError(f"proposal {proposal_id} has no linked RFP")
     return row["rfp_id"]
+
+
+def set_drafting_status(
+    proposal_id: UUID, status: str, failure_reason: str | None = None
+) -> None:
+    """Advances one proposal's drafting lifecycle.
+
+    Lives on the proposal, not on `rfp_documents.processing_status` where it
+    used to: two bids drafted from one solicitation were overwriting each
+    other's progress, and a failure from one run was shown against the other
+    (migration 0005).
+
+    Unscoped, like the other worker entry points here — the agent runs with no
+    request identity, and the route that queued it authorised the proposal
+    first. `failure_reason` is kept only for the failure state, so a successful
+    re-run cannot leave the previous attempt's error on display.
+    """
+    if status not in DRAFTING_STATUSES:
+        raise ValueError(f"unknown drafting status {status!r}")
+    conn = get_connection()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE proposals SET drafting_status = %s, "
+                "drafting_failure_reason = %s, updated_at = NOW() "
+                "WHERE proposal_id = %s;",
+                (
+                    status,
+                    failure_reason if status == "draft_failed" else None,
+                    str(proposal_id),
+                ),
+            )
+    finally:
+        conn.close()
 
 
 def proposal_ids_for_rfp(rfp_id: UUID) -> list[UUID]:

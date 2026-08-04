@@ -40,7 +40,9 @@ router = APIRouter(tags=["Workspace"])
 class DraftQueuedResponse(CamelModel):
     proposal_id: str
     rfp_id: str
-    processing_status: str
+    # The proposal's own drafting lifecycle, not the document's ingestion
+    # status — see migration 0005.
+    drafting_status: str
     requirements_count: int
 
 
@@ -189,8 +191,11 @@ def draft_proposal(
     until sections became proposal-scoped): drafting writes a proposal's own
     sections, and one RFP can back several proposals.
 
-    Poll `GET /documents/{rfpId}` for status ('drafting' → 'drafted') and
-    `GET /proposals/{proposalId}/sections` for the results.
+    Poll `GET /proposals/{proposalId}` for `draftingStatus` ('drafting' →
+    'drafted', or 'draft_failed' with `draftingFailureReason`) and
+    `GET /proposals/{proposalId}/sections` for the results. That flag moved off
+    the document in migration 0005 — polling `GET /documents/{rfpId}` would
+    report whichever bid on this RFP happened to write last.
     """
     rfp_id = _rfp(proposal_id, user_id)  # 404/409 + ownership in one place
     requirements_count = docs.count_requirements(rfp_id)
@@ -200,14 +205,18 @@ def draft_proposal(
             status.HTTP_409_CONFLICT,
             "No requirements extracted yet — ingest the RFP before drafting.",
         )
-    docs.update_status(rfp_id, "drafting")
+    # Set here rather than only in the worker: between the 202 and the worker
+    # picking the job up, a client polling for 'drafting' would otherwise read
+    # the previous run's 'drafted' and stop, concluding instantly that a draft
+    # it just requested was already finished.
+    proposals_service.set_drafting_status(proposal_id, "drafting")
     # Authorised here, before queueing: the worker resolves the proposal without
     # a tenant check because it has no request identity.
     celery_app.send_task("draft_proposal", args=[str(proposal_id)])
     return DraftQueuedResponse(
         proposal_id=str(proposal_id),
         rfp_id=str(rfp_id),
-        processing_status="drafting",
+        drafting_status="drafting",
         requirements_count=requirements_count,
     )
 

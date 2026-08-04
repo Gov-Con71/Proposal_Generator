@@ -609,3 +609,137 @@ def test_ungrounded_section_is_flagged_for_review(seeded_rfp, monkeypatch):
 
     notes = _fetch_sections(proposal_id)[0]["review_notes"]
     assert notes and "past-performance" in notes
+
+
+# ---------------------------------------------------------------------------
+# Drafting lifecycle (migration 0005): the flag belongs to the proposal
+# ---------------------------------------------------------------------------
+
+def _fetch_drafting(proposal_id: str) -> tuple[str, str | None]:
+    conn = psycopg2.connect(settings.database_url)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT drafting_status, drafting_failure_reason FROM proposals "
+        "WHERE proposal_id = %s;",
+        (proposal_id,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0], row[1]
+
+
+def _fetch_doc_status(rfp_id: str) -> tuple[str, str | None]:
+    conn = psycopg2.connect(settings.database_url)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT processing_status, failure_reason FROM rfp_documents WHERE rfp_id = %s;",
+        (rfp_id,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0], row[1]
+
+
+def _second_proposal_on(rfp_id: str, user_id: str) -> str:
+    """A competing bid on the same solicitation — the case that motivated 0005."""
+    proposal_id = str(uuid.uuid4())
+    conn = psycopg2.connect(settings.database_url)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO proposals (proposal_id, owned_by, rfp_id, title) "
+        "VALUES (%s, %s, %s, 'Second Bid');",
+        (proposal_id, user_id, rfp_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return proposal_id
+
+
+def test_drafting_status_is_recorded_on_the_proposal_not_the_document(
+    seeded_rfp, monkeypatch
+):
+    """Drafting one bid must not report progress for another on the same RFP.
+
+    The flag used to live on `rfp_documents.processing_status`, so the second
+    proposal here would have read 'drafted' without a single section of its own
+    ever being written, and the document would have been left carrying a
+    drafting state that has nothing to do with ingestion.
+    """
+    rfp_id = seeded_rfp["rfp_id"]
+    drafted = seeded_rfp["proposal_id"]
+    untouched = _second_proposal_on(rfp_id, seeded_rfp["user_id"])
+
+    monkeypatch.setattr(
+        drafting_agent,
+        "_call_planner",
+        lambda _p: ProposalOutline(sections=[_planned("Technical Approach", [0], "t")]),
+    )
+    monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)
+    fake_section_draft, _ = _fake_draft()
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
+
+    drafting_agent.run_drafting_sync(drafted)
+
+    assert _fetch_drafting(drafted) == ("drafted", None)
+    assert _fetch_drafting(untouched) == ("idle", None)
+    # The document only ever describes how far ingestion got.
+    assert _fetch_doc_status(rfp_id) == ("completed", None)
+
+
+def test_failed_drafting_records_its_reason_on_the_proposal(seeded_rfp, monkeypatch):
+    """A failed draft is attributable to the bid that failed, with a reason.
+
+    Recording it on the document meant a second proposal on the same RFP showed
+    a failure it never had — and the reason overwrote any genuine *ingestion*
+    failure reason sitting in the same column.
+    """
+    rfp_id = seeded_rfp["rfp_id"]
+    proposal_id = seeded_rfp["proposal_id"]
+    other = _second_proposal_on(rfp_id, seeded_rfp["user_id"])
+
+    def exploding_planner(_prompt):
+        raise RuntimeError("model gemini-1.0-pro is not found")
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", exploding_planner)
+
+    with pytest.raises(RuntimeError):
+        drafting_agent.run_drafting_sync(proposal_id)
+
+    status, reason = _fetch_drafting(proposal_id)
+    assert status == "draft_failed"
+    assert reason and "is not found" in reason  # the actionable part, not a traceback
+
+    assert _fetch_drafting(other) == ("idle", None)
+    assert _fetch_doc_status(rfp_id) == ("completed", None)
+
+
+def test_a_successful_rerun_clears_the_previous_failure_reason(seeded_rfp, monkeypatch):
+    """Otherwise a proposal that now drafts fine still displays the old error."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    monkeypatch.setattr(
+        drafting_agent,
+        "_call_planner",
+        lambda _p: (_ for _ in ()).throw(RuntimeError("transient provider outage")),
+    )
+    with pytest.raises(RuntimeError):
+        drafting_agent.run_drafting_sync(proposal_id)
+    assert _fetch_drafting(proposal_id)[0] == "draft_failed"
+
+    monkeypatch.setattr(
+        drafting_agent,
+        "_call_planner",
+        lambda _p: ProposalOutline(sections=[_planned("Technical Approach", [0], "t")]),
+    )
+    monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)
+    fake_section_draft, _ = _fake_draft()
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    assert _fetch_drafting(proposal_id) == ("drafted", None)
+
+

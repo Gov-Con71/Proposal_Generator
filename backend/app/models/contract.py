@@ -130,6 +130,11 @@ class Proposal(ProposalSummary):
     tone: str
     page_limit: int
     document_id: str
+    # The AI writer's lifecycle for *this* proposal: idle | drafting | drafted |
+    # draft_failed. It lived on the document until migration 0005, where two
+    # proposals answering one RFP overwrote each other's progress.
+    drafting_status: str
+    drafting_failure_reason: Optional[str] = None
     total_requirements: int
     addressed_requirements: int
     partial_requirements: int

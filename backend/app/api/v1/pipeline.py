@@ -44,16 +44,18 @@ _STEPS = [
     ("ready", "Ready", "Compliance matrix is ready for review."),
 ]
 
-# Real processing_status → (# fully-completed steps, failed?). Statuses in the
-# drafting family mean ingestion already finished, so they read as complete.
+# Real processing_status → (# fully-completed steps, failed?).
+#
+# The drafting states ('drafting'/'drafted'/'draft_failed') used to appear here,
+# mapped to "ingestion complete", because the document carried both lifecycles.
+# Migration 0005 moved drafting onto the proposal, so this column describes only
+# how far ingestion got. An unrecognised status still falls through to (0, False)
+# via `.get`, which is the right answer for a state this view knows nothing about.
 _STATUS_MAP = {
     "pending": (1, False),
     "parsing": (1, False),
     "extracting": (2, False),
     "completed": (len(_STEPS), False),
-    "drafting": (len(_STEPS), False),
-    "drafted": (len(_STEPS), False),
-    "draft_failed": (len(_STEPS), False),
     "failed": (2, True),
 }
 

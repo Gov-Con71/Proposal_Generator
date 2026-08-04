@@ -46,9 +46,10 @@ class DocumentStatusResponse(CamelModel):
     file_name: str
     processing_status: str
     requirements_count: int
-    # Why it failed, when processing_status is 'failed'/'draft_failed'. Without
-    # this the UI can only say "failed", and a retired model reads exactly like
-    # a corrupt PDF (GAP_ANALYSIS §1.1).
+    # Why *ingestion* failed, when processing_status is 'failed'. Without this
+    # the UI can only say "failed", and a retired model reads exactly like a
+    # corrupt PDF (GAP_ANALYSIS §1.1). A failed draft reports itself on the
+    # proposal instead (`draftingFailureReason`) — see migration 0005.
     failure_reason: str | None = None
 
 

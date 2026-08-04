@@ -200,3 +200,73 @@ def test_two_proposals_on_one_rfp_keep_separate_sections(
     # ...but the draft belongs to the first one alone.
     assert test_client.get(f"/proposals/{first}/sections", headers=auth).json() != []
     assert test_client.get(f"/proposals/{second}/sections", headers=auth).json() == []
+
+
+def test_queueing_a_draft_marks_only_that_proposal(
+    monkeypatch, test_client, proposal_with_requirements
+):
+    """POST /proposals/{id}/draft reports on the proposal, not the document.
+
+    The route sets 'drafting' itself rather than leaving it to the worker: a
+    client that polls immediately after the 202 would otherwise read whatever
+    the previous run left behind and conclude the draft was already done.
+    """
+    from app.api.v1 import workspace as wsapi
+
+    queued: list[tuple] = []
+    monkeypatch.setattr(
+        wsapi.celery_app, "send_task", lambda name, args=None, **kw: queued.append((name, args))
+    )
+
+    user_id = proposal_with_requirements["user_id"]
+    rfp_id = proposal_with_requirements["rfp_id"]
+    first = proposal_with_requirements["proposal_id"]
+    auth = _auth(user_id)
+
+    second = str(uuid.uuid4())
+    conn = _conn()
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO proposals (proposal_id, owned_by, rfp_id, title) "
+            "VALUES (%s, %s, %s, 'Competing Bid');",
+            (second, user_id, rfp_id),
+        )
+    conn.close()
+
+    resp = test_client.post(f"/proposals/{first}/draft", headers=auth)
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["draftingStatus"] == "drafting"
+    assert body["proposalId"] == first
+    assert queued == [("draft_proposal", [first])]
+
+    assert test_client.get(f"/proposals/{first}", headers=auth).json()["draftingStatus"] == "drafting"
+    # The competing bid is untouched, and so is the document behind both.
+    assert test_client.get(f"/proposals/{second}", headers=auth).json()["draftingStatus"] == "idle"
+    doc = test_client.get(f"/documents/{rfp_id}", headers=auth).json()
+    assert doc["processingStatus"] == "completed"
+
+
+def test_drafting_a_proposal_with_no_requirements_is_a_409(
+    monkeypatch, test_client, proposal_with_requirements
+):
+    """Drafting is grounded in the extracted matrix, so an un-ingested RFP is a
+    conflict rather than a queued job that would fail minutes later."""
+    from app.api.v1 import workspace as wsapi
+
+    monkeypatch.setattr(wsapi.celery_app, "send_task", lambda *a, **kw: None)
+
+    user_id = proposal_with_requirements["user_id"]
+    rfp_id = proposal_with_requirements["rfp_id"]
+    proposal_id = proposal_with_requirements["proposal_id"]
+    auth = _auth(user_id)
+
+    conn = _conn()
+    with conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM extracted_requirements WHERE rfp_id = %s;", (rfp_id,))
+    conn.close()
+
+    resp = test_client.post(f"/proposals/{proposal_id}/draft", headers=auth)
+    assert resp.status_code == 409
+    # And nothing was left claiming to be in progress.
+    assert test_client.get(f"/proposals/{proposal_id}", headers=auth).json()["draftingStatus"] == "idle"

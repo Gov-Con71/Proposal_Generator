@@ -661,17 +661,18 @@ async def run_drafting(proposal_id: UUID) -> dict:
     independent sets. The document behind it supplies the requirements.
 
     Loads + plans once, then fans out over sections with bounded concurrency
-    (`settings.draft_max_concurrency`). Tracks progress on rfp_documents.processing_status as a
-    post-ingestion lifecycle phase: 'drafting' → 'drafted' (or 'draft_failed').
+    (`settings.draft_max_concurrency`). Progress is tracked on
+    `proposals.drafting_status`: 'drafting' → 'drafted' (or 'draft_failed').
 
-    Note that status still lives on the *document*, so two proposals drafting
-    from one RFP would overwrite each other's progress flag. Harmless today (the
-    flag is advisory and the sections themselves are now correctly separated),
-    but it belongs on the proposal — tracked as a follow-up.
+    That flag lives on the proposal rather than on the document (migration
+    0005) precisely because this function is per-proposal: two bids drafted
+    from one solicitation were overwriting each other's progress, and one run's
+    failure was displayed against the other. `rfp_documents.processing_status`
+    now only ever describes ingestion.
     """
     proposal = UUID(str(proposal_id))
     rfp = proposals_service.rfp_for_proposal_unscoped(proposal)
-    docs.update_status(rfp, "drafting")
+    proposals_service.set_drafting_status(proposal, "drafting")
     try:
         # Loading + planning are blocking (DB + one LLM call); run off the loop.
         uploaded_by, requirements, summary, profile = await asyncio.to_thread(
@@ -737,12 +738,14 @@ async def run_drafting(proposal_id: UUID) -> dict:
 
         section_ids = await asyncio.gather(*(_draft_one(s) for s in outline))
     except Exception as exc:
-        docs.update_status(rfp, "draft_failed", docs.failure_reason(exc))
+        proposals_service.set_drafting_status(
+            proposal, "draft_failed", docs.failure_reason(exc)
+        )
         logger.exception("drafting failed for proposal=%s rfp=%s", proposal, rfp)
         raise
 
     saved = [sid for sid in section_ids if sid]
-    docs.update_status(rfp, "drafted")
+    proposals_service.set_drafting_status(proposal, "drafted")
     # The agent writes sections straight to the DB, so it must evict what the
     # API cached on the tenant's behalf — the workspace polls sections while
     # drafting runs, so an empty list is cached long before the first save

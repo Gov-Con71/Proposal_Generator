@@ -259,42 +259,48 @@ export function useGenerateSection(proposalId: string) {
   })
 }
 
-/** Drives the full drafting agent imperatively: POST /documents/{rfpId}/draft →
- *  poll the document status until 'drafted' → refresh the sections list.
+/** Drives the full drafting agent imperatively: POST /proposals/{id}/draft →
+ *  poll the proposal's draftingStatus until 'drafted' → refresh the sections.
+ *
+ *  Everything here is keyed on the proposal. It used to trigger on the proposal
+ *  but poll the *document*, which reported whichever bid on that RFP wrote last
+ *  — so a second proposal's draft could show as finished the moment the first
+ *  one completed. Migration 0005 moved the flag onto the proposal; this follows
+ *  it, and no longer needs the rfpId at all.
  *
  *  Drafting is many LLM calls (plan → per-section draft + compliance critique),
  *  so it can take minutes on a constrained provider quota — hence the generous
- *  poll cap. `rfpId` triggers/polls; `proposalId` keys the sections cache to
- *  invalidate so the drafted sections appear. */
-export function useGenerateDraft(rfpId: string, proposalId: string) {
+ *  poll cap. */
+export function useGenerateDraft(proposalId: string) {
   const qc = useQueryClient()
   const [status, setStatus] = useState<'idle' | 'drafting' | 'failed'>('idle')
   const [error, setError] = useState<string | null>(null)
 
   async function generate() {
-    // Drafting is queued per proposal; progress is still polled on the document
-    // behind it, so both ids are required.
-    if (!isValidId(rfpId) || !isValidId(proposalId)) return
+    if (!isValidId(proposalId)) return
     setError(null)
     setStatus('drafting')
     try {
       await documentsApi.draft(proposalId)
       // Poll until the worker finishes ('drafted') or fails ('draft_failed').
+      // The POST has already set 'drafting', so the first read cannot race
+      // ahead and see a previous run's terminal state.
       const startedAt = Date.now()
-      let doc = await documentsApi.status(rfpId)
-      while (doc.processingStatus === 'drafting') {
+      let proposal = await proposalsApi.get(proposalId)
+      while (proposal.draftingStatus === 'drafting') {
         if (Date.now() - startedAt > 15 * 60_000) {
           throw new Error('Drafting timed out — please try again.')
         }
         await new Promise((r) => setTimeout(r, 3000))
-        doc = await documentsApi.status(rfpId)
+        proposal = await proposalsApi.get(proposalId)
       }
-      // The server now records *why* it failed; show that instead of a generic
+      // The server records *why* it failed; show that instead of a generic
       // message, which is the difference between "retry" and "fix your config".
-      if (doc.processingStatus === 'draft_failed') {
-        throw new Error(doc.failureReason || 'Draft generation failed.')
+      if (proposal.draftingStatus === 'draft_failed') {
+        throw new Error(proposal.draftingFailureReason || 'Draft generation failed.')
       }
       qc.invalidateQueries({ queryKey: ['sections', proposalId] })
+      qc.invalidateQueries({ queryKey: ['proposals', proposalId] })
       setStatus('idle')
     } catch (e) {
       const err = e as { response?: { data?: { detail?: string } }; message?: string }

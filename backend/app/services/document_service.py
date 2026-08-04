@@ -56,12 +56,16 @@ def create_rfp_document(uploaded_by: UUID, file_name: str, s3_key: str) -> UUID:
     return rfp_id
 
 
-_FAILURE_STATUSES = {"failed", "draft_failed"}
+# Only ingestion failures land here now; drafting failures are recorded on the
+# proposal by `proposals_service.set_drafting_status` (migration 0005).
+_FAILURE_STATUSES = {"failed"}
 _REASON_MAX_CHARS = 500
 
 
 def failure_reason(exc: Exception) -> str:
-    """A short, user-facing explanation to store against a failed document.
+    """A short, user-facing explanation to store against a failed run.
+
+    Shared by the document and proposal failure paths.
 
     Kept to the exception's type and message: enough for a reader to tell a
     provider/config problem from a bad document, without pasting a traceback —

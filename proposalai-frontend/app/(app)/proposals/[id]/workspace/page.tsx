@@ -35,11 +35,12 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
   const generate = useGenerateSection(id)
   const saveSection = useSaveSection(id)
 
-  // Drafting is queued against this proposal (its sections are its own), but
-  // progress is polled on the document behind it, whose id is documentId.
+  // Drafting is queued against this proposal and reports progress on it too.
+  // The document is still read here for one thing only: whether an RFP has been
+  // ingested at all, which is what makes drafting possible.
   const proposal = useProposal(id)
   const rfpId = proposal.data?.documentId ?? ''
-  const draft = useGenerateDraft(rfpId, id)
+  const draft = useGenerateDraft(id)
   const { data: sections = [] } = useSections(id)
 
   const [selectedReqId, setSelectedReqId] = useState<string | null>(null)
