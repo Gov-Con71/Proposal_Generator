@@ -11,6 +11,8 @@ from app.services.draft_writer import (
     _SECTION_SYSTEM_PROMPT,
     _assemble_section_prompt,
     _format_company_profile,
+    grounding_confidence,
+    reference_tags,
 )
 
 
@@ -143,3 +145,35 @@ def test_system_prompt_encodes_the_govcon_drafting_spec():
     assert "world-class" in _SECTION_SYSTEM_PROMPT
     assert "industry-leading" in _SECTION_SYSTEM_PROMPT
     assert "[INSERT]" in _SECTION_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Retrieval grounding (migration 0007): what the workspace actually renders
+# ---------------------------------------------------------------------------
+
+def test_confidence_is_the_mean_similarity_of_the_supplied_evidence():
+    citations = [{"source_name": "a.pdf", "score": 0.9}, {"source_name": "b.pdf", "score": 0.5}]
+    assert grounding_confidence(citations) == 0.7
+
+
+def test_confidence_is_zero_without_evidence():
+    """An ungrounded draft scores 0 — the case a reviewer most needs flagged.
+
+    It is not a missing value: the section may read perfectly well and still
+    have nothing in the tenant's history supporting a word of it.
+    """
+    assert grounding_confidence([]) == 0.0
+
+
+def test_reference_tags_deduplicate_sources_strongest_first():
+    """Several chunks of one past proposal cite one source; the UI shows chips."""
+    citations = [
+        {"source_name": "past_bid.pdf", "score": 0.4},
+        {"source_name": "capability.docx", "score": 0.8},
+        {"source_name": "past_bid.pdf", "score": 0.6},  # same source, better chunk
+    ]
+    assert reference_tags(citations) == ["capability.docx", "past_bid.pdf"]
+
+
+def test_reference_tags_ignore_unnamed_sources():
+    assert reference_tags([{"source_name": "", "score": 0.9}, {"score": 0.8}]) == []

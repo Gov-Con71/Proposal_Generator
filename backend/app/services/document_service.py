@@ -217,6 +217,8 @@ def insert_proposal_section(
     requirement_id: UUID | None = None,
     status: str = "needs_review",
     review_notes: str | None = None,
+    confidence: float = 0.0,
+    reference_tags: list[str] | None = None,
 ) -> UUID:
     """Inserts one drafted proposal section and returns its id.
 
@@ -229,6 +231,10 @@ def insert_proposal_section(
 
     `review_notes` carries the compliance critic's unresolved feedback for a
     section saved needs_review, so a reviewer can see what still needs attention.
+
+    `confidence` and `reference_tags` record how well-evidenced the draft is —
+    see `draft_writer.grounding_confidence`. Defaulted so the non-RAG callers
+    (an empty section created by hand) store the honest 0/[] rather than nothing.
     """
     section_id = uuid4()
     conn = get_connection()
@@ -238,8 +244,9 @@ def insert_proposal_section(
                 """
                 INSERT INTO proposal_sections
                     (section_id, proposal_id, requirement_id, section_title,
-                     generated_draft_content, status, review_notes)
-                VALUES (%s, %s, %s, %s, %s, %s, %s);
+                     generated_draft_content, status, review_notes,
+                     ai_confidence_score, reference_tags)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
                 """,
                 (
                     str(section_id),
@@ -249,6 +256,8 @@ def insert_proposal_section(
                     content,
                     status,
                     review_notes,
+                    confidence,
+                    Json(reference_tags or []),
                 ),
             )
     finally:

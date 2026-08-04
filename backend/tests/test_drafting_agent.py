@@ -743,3 +743,80 @@ def test_a_successful_rerun_clears_the_previous_failure_reason(seeded_rfp, monke
     assert _fetch_drafting(proposal_id) == ("drafted", None)
 
 
+def test_drafted_section_persists_its_retrieval_grounding(seeded_rfp, monkeypatch):
+    """Confidence and citations reach the section the workspace renders.
+
+    Both were hardcoded 0.0 and [] at the point of save, so a real RAG draft
+    showed an empty confidence meter and no sources however well-evidenced it
+    was — the retriever had computed both and the save path dropped them.
+    """
+    proposal_id = seeded_rfp["proposal_id"]
+
+    monkeypatch.setattr(
+        drafting_agent,
+        "_call_planner",
+        lambda _p: ProposalOutline(sections=[_planned("Technical Approach", [0], "t")]),
+    )
+    monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)
+
+    def grounded_draft(**kwargs):
+        return {
+            "content": "Drafted body grounded in prior work.",
+            "grounded": True,
+            "citations": [
+                {"source_name": "past_bid.pdf", "score": 0.82},
+                {"source_name": "capability.docx", "score": 0.58},
+                {"source_name": "past_bid.pdf", "score": 0.40},
+            ],
+        }
+
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", grounded_draft)
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    conn = psycopg2.connect(settings.database_url)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT ai_confidence_score, reference_tags FROM proposal_sections "
+        "WHERE proposal_id = %s;",
+        (proposal_id,),
+    )
+    score, tags = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    assert score == pytest.approx((0.82 + 0.58 + 0.40) / 3, abs=1e-4)
+    assert tags == ["past_bid.pdf", "capability.docx"]  # deduped, strongest first
+
+
+def test_ungrounded_section_persists_a_zero_score_and_no_sources(seeded_rfp, monkeypatch):
+    """0.0 here is a finding, not a missing value — nothing supports the prose."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    monkeypatch.setattr(
+        drafting_agent,
+        "_call_planner",
+        lambda _p: ProposalOutline(sections=[_planned("Technical Approach", [0], "t")]),
+    )
+    monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)
+    monkeypatch.setattr(
+        drafting_agent,
+        "generate_section_draft",
+        lambda **kw: {"content": "Generic body.", "grounded": False, "citations": []},
+    )
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    conn = psycopg2.connect(settings.database_url)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT ai_confidence_score, reference_tags FROM proposal_sections "
+        "WHERE proposal_id = %s;",
+        (proposal_id,),
+    )
+    score, tags = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    assert score == 0.0
+    assert tags == []

@@ -184,6 +184,39 @@ def _assemble_section_prompt(
 _MIN_CONTEXT_SCORE = 0.35
 
 
+def grounding_confidence(citations: list[dict]) -> float:
+    """How well-evidenced a draft is, in [0, 1].
+
+    Defined narrowly and on purpose: the mean cosine similarity of the
+    past-performance context actually supplied to the writer, and 0.0 when none
+    was. It measures the *evidence*, not the prose — a section can be fluent,
+    compliant and still score 0 here, which is precisely the case a reviewer
+    needs flagged, because nothing in the tenant's history supports it.
+
+    The compliance critic's verdict is deliberately not folded in. It is already
+    surfaced on its own terms (`status`, `review_notes`), and blending two
+    unrelated signals into one number would make it mean neither.
+    """
+    scores = [c["score"] for c in citations if c.get("score") is not None]
+    if not scores:
+        return 0.0
+    return round(sum(scores) / len(scores), 4)
+
+
+def reference_tags(citations: list[dict]) -> list[str]:
+    """Distinct source documents behind a draft, strongest match first.
+
+    Deduplicated because several chunks of one past proposal cite one source,
+    and the workspace renders these as one chip per source.
+    """
+    seen: dict[str, float] = {}
+    for c in citations:
+        name = (c.get("source_name") or "").strip()
+        if name:
+            seen[name] = max(seen.get(name, 0.0), c.get("score") or 0.0)
+    return [name for name, _ in sorted(seen.items(), key=lambda kv: -kv[1])]
+
+
 def generate_section_draft(
     uploaded_by: UUID,
     section_title: str,

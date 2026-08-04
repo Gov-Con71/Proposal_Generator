@@ -13,7 +13,7 @@ answering one RFP share them, by design) and resolve through
 import logging
 from uuid import UUID
 
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import Json, RealDictCursor
 
 from app.core.db import get_connection
 from app.models.contract import ProposalSection, Requirement
@@ -206,10 +206,13 @@ def _to_section(row: dict) -> ProposalSection:
         content=content,
         status=status,
         word_count=len(content.split()),
-        ai_confidence_score=0.0,
+        # Real retrieval grounding since migration 0007; both were hardcoded
+        # 0.0/[] before it, so the workspace's confidence and citation UI had
+        # nothing to render. A section written by hand legitimately has neither.
+        ai_confidence_score=float(row.get("ai_confidence_score") or 0.0),
         ai_flags=[],
         mapped_requirement_ids=[str(row["requirement_id"])] if row.get("requirement_id") else [],
-        reference_tags=[],
+        reference_tags=row.get("reference_tags") or [],
         review_notes=row.get("review_notes"),
         last_edited_at=row["updated_at"].isoformat() if row.get("updated_at") else "",
         last_edited_by="",
@@ -218,7 +221,7 @@ def _to_section(row: dict) -> ProposalSection:
 
 _SECTION_COLS = (
     "section_id, proposal_id, requirement_id, section_title, generated_draft_content, "
-    "status, review_notes, created_at, updated_at"
+    "status, review_notes, ai_confidence_score, reference_tags, created_at, updated_at"
 )
 
 
@@ -305,15 +308,26 @@ def update_section(section_id: UUID, user_id: UUID, content: str | None, status:
     return _to_section(row)
 
 
-def save_generated_draft(section_id: UUID, content: str) -> ProposalSection:
-    """Writes a freshly generated draft to a section (ownership already checked)."""
+def save_generated_draft(
+    section_id: UUID,
+    content: str,
+    confidence: float = 0.0,
+    reference_tags: list[str] | None = None,
+) -> ProposalSection:
+    """Writes a freshly generated draft to a section (ownership already checked).
+
+    The grounding is overwritten, not merged: it describes *this* generation, so
+    a regenerate that retrieved nothing must clear the previous run's citations
+    rather than leave them attached to prose they no longer support.
+    """
     conn = get_connection()
     try:
         with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "UPDATE proposal_sections SET generated_draft_content = %s, status = 'draft', "
+                "ai_confidence_score = %s, reference_tags = %s, "
                 f"updated_at = NOW() WHERE section_id = %s RETURNING {_SECTION_COLS};",
-                (content, str(section_id)),
+                (content, confidence, Json(reference_tags or []), str(section_id)),
             )
             row = cur.fetchone()
     finally:

@@ -44,7 +44,12 @@ from app.services.compliance_extractor import (
     EVALUATION_CATEGORY,
     INSTRUCTION_CATEGORY,
 )
-from app.services.draft_writer import _format_company_profile, generate_section_draft
+from app.services.draft_writer import (
+    _format_company_profile,
+    generate_section_draft,
+    grounding_confidence,
+    reference_tags,
+)
 from app.services.guardrails import DraftGuardrailError
 from app.services.llm import get_llm
 from app.services.retrieval import tenant_history_count
@@ -450,6 +455,7 @@ def _draft_section_node(state: DraftingState) -> DraftingState:
     # Fall back to the brief when the planner mapped no requirements to a section.
     requirement_texts = section["requirement_texts"] or [section["brief"]]
     grounded = False
+    citations: list[dict] = []
     try:
         result = generate_section_draft(
             uploaded_by=UUID(state["uploaded_by"]),
@@ -466,6 +472,10 @@ def _draft_section_node(state: DraftingState) -> DraftingState:
         # Quality signal, not core data — default to "not grounded" so a writer
         # that omits it errs toward flagging the section for review.
         grounded = result.get("grounded", False)
+        # Carried to save_section, where they become the section's confidence
+        # score and citation chips. A revision replaces them, so what is stored
+        # describes the attempt that was actually persisted.
+        citations = result.get("citations") or []
     except DraftGuardrailError as exc:
         # Expected rejection: keep the run going; flag for human attention at save.
         logger.warning("drafting: section '%s' failed guardrail: %s", section["title"], exc)
@@ -479,7 +489,12 @@ def _draft_section_node(state: DraftingState) -> DraftingState:
 
     return {
         **state,
-        "section": {**section, "content": content, "grounded": grounded},
+        "section": {
+            **section,
+            "content": content,
+            "grounded": grounded,
+            "citations": citations,
+        },
         "attempts": attempts,
     }
 
@@ -606,6 +621,10 @@ def _save_section_node(state: DraftingState) -> DraftingState:
             "unevidenced; verify before submission."
         )
     review_notes = "\n".join(notes) or None
+    # The retrieval that produced this draft, recorded rather than discarded:
+    # the workspace renders both, and until now got a hardcoded 0.0 and [].
+    # A guardrail-rejected section has no citations, which correctly scores 0.
+    citations = section.get("citations") or []
     section_id = docs.insert_proposal_section(
         proposal_id=UUID(state["proposal_id"]),
         section_title=section["title"],
@@ -613,6 +632,8 @@ def _save_section_node(state: DraftingState) -> DraftingState:
         requirement_id=UUID(primary_req) if primary_req else None,
         status=status,
         review_notes=review_notes,
+        confidence=grounding_confidence(citations) if content else 0.0,
+        reference_tags=reference_tags(citations) if content else [],
     )
     return {**state, "section_id": str(section_id)}
 

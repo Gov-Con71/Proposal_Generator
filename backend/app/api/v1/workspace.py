@@ -116,6 +116,19 @@ def _invalidate_sections(user_id: UUID, section: ProposalSection) -> None:
     cache.cache_delete(cache.sections_key(user_id, section.proposal_id))
 
 
+def _grounding(result: dict) -> tuple[float, list[str]]:
+    """(confidence, reference tags) for a single-section RAG draft.
+
+    The same derivation the full drafting agent applies, so a section written
+    one at a time is scored on the same basis as one written by a full run.
+    """
+    citations = result.get("citations") or []
+    return (
+        draft_writer.grounding_confidence(citations),
+        draft_writer.reference_tags(citations),
+    )
+
+
 @router.get("/proposals/{proposal_id}/sections", response_model=list[ProposalSection])
 def list_sections(proposal_id: UUID, user_id: UUID = Depends(get_current_user_id)):
     # No _rfp() translation: sections are keyed on the proposal directly, so the
@@ -170,7 +183,7 @@ def regenerate_section(section_id: UUID, user_id: UUID = Depends(get_current_use
     _guard(ws.get_section, section_id, user_id)  # ownership check
     requirement_text = ws.requirement_text_for_section(section_id)
     result = draft_writer.generate_draft(user_id, requirement_text)
-    section = ws.save_generated_draft(section_id, result["content"])
+    section = ws.save_generated_draft(section_id, result["content"], *_grounding(result))
     _invalidate_sections(user_id, section)
     return section
 
@@ -243,6 +256,6 @@ def generate_section(
     title = payload.title or f"Response to {match.section or 'requirement'}"
     section = ws.create_section(proposal_id, user_id, title, payload.requirement_id)
     result = draft_writer.generate_draft(user_id, match.text)
-    section = ws.save_generated_draft(UUID(section.id), result["content"])
+    section = ws.save_generated_draft(UUID(section.id), result["content"], *_grounding(result))
     _invalidate_sections(user_id, section)
     return section
