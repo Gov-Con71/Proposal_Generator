@@ -47,3 +47,21 @@ class LLMProvider(ABC):
     @abstractmethod
     def embedding_dim(self) -> int:
         """Vector dimension of `embed` output; must match the DB schema (vector(N))."""
+
+    # --- optional capability -------------------------------------------------
+
+    def available_models(self) -> Optional[list[str]]:
+        """Model names this provider will accept, or None if it cannot say.
+
+        Deliberately not abstract: enumerating models is a convenience some APIs
+        offer and others do not, and an adapter that cannot answer should not be
+        forced to invent one. None means "unknown", which callers must treat as
+        "no opinion" rather than "empty".
+
+        This exists for the startup check. A retired model name once took the
+        whole product down and surfaced as a quota error, because the first
+        symptom appeared minutes later inside a Celery task (GAP_ANALYSIS §1.1).
+        Asking the provider at boot turns that into a startup failure naming the
+        exact setting.
+        """
+        return None

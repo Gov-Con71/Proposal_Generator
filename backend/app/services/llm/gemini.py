@@ -201,3 +201,28 @@ class GeminiProvider(LLMProvider):
     @property
     def embedding_dim(self) -> int:
         return self._embed_dim
+
+    def available_models(self) -> Optional[list[str]]:
+        """Model names the configured key can actually call.
+
+        Returns None rather than raising when the API cannot be reached: the
+        startup check must distinguish "this model does not exist" (a
+        configuration error worth failing on) from "we could not ask right now"
+        (a network blip that must not stop the process from booting).
+
+        Names come back namespaced (`models/gemini-2.5-flash`); the bare form is
+        included too so a caller can match whichever the settings use.
+        """
+        try:
+            names: list[str] = []
+            for model in self._client().models.list():
+                name = getattr(model, "name", None)
+                if not name:
+                    continue
+                names.append(name)
+                if name.startswith("models/"):
+                    names.append(name.split("/", 1)[1])
+            return names or None
+        except Exception as exc:  # noqa: BLE001 — "could not ask" is not "invalid"
+            logger.warning("Could not list Gemini models: %s", exc)
+            return None

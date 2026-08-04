@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import documents
@@ -40,11 +42,27 @@ tags_metadata = [
     {"name": "Proposals", "description": "Live, DB-backed proposal CRUD (Sprint 6)."},
 ]
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Runs the boot-time checks that make a silently degraded process say so.
+
+    Both of the dependencies checked here fail quietly by design — the cache
+    degrades to a miss, and a bad model name only shows up on the first
+    generation, minutes later, inside a worker. See app/core/startup_checks.py
+    for the two incidents that motivated it.
+    """
+    from app.core.startup_checks import run_startup_checks
+
+    run_startup_checks()
+    yield
+
+
 app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
     description=DESCRIPTION,
     openapi_tags=tags_metadata,
+    lifespan=lifespan,
 )
 
 app.add_middleware(

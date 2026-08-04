@@ -1,4 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional
+
 from pydantic import Field
 
 class Settings(BaseSettings):
@@ -167,6 +169,23 @@ class Settings(BaseSettings):
     cache_url: str = Field(default="redis://localhost:6379/2", validation_alias="CACHE_URL")
     cache_ttl_seconds: int = Field(default=60, validation_alias="CACHE_TTL_SECONDS")
     cache_enabled: bool = Field(default=True, validation_alias="CACHE_ENABLED")
+
+    # --- Startup checks ---
+    # Whether a failed boot-time check stops the process. Defaults to on in
+    # production, where a container that boots and cannot generate is worse than
+    # one that refuses to start: the first fails for a user, the second fails in
+    # the deploy pipeline. Off elsewhere so a developer with no API key can still
+    # run the API. See app/core/startup_checks.py.
+    # Unset means "decide from the environment"; an explicit value always wins.
+    startup_checks_strict_setting: Optional[bool] = Field(
+        default=None, validation_alias="STARTUP_CHECKS_STRICT"
+    )
+
+    @property
+    def startup_checks_strict(self) -> bool:
+        if self.startup_checks_strict_setting is not None:
+            return self.startup_checks_strict_setting
+        return self.environment.lower() == "production"
 
     # --- Observability (Sprint 5) ---
     telemetry_enabled: bool = Field(default=True, validation_alias="TELEMETRY_ENABLED")
