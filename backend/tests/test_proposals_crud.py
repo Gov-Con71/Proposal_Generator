@@ -166,7 +166,9 @@ def test_update_and_delete(test_client, seeded_user):
     assert test_client.delete(f"/proposals/{pid}", headers=auth).status_code == 404  # already gone
 
 
-def test_integrity_checklist_derived_from_real_data(test_client, rfp_with_mixed_compliance):
+def test_integrity_checklist_derived_from_real_data(
+    test_client, rfp_with_mixed_compliance, other_tenant
+):
     auth = _auth(rfp_with_mixed_compliance["user_id"])
     rfp_id = rfp_with_mixed_compliance["rfp_id"]
 
@@ -189,7 +191,7 @@ def test_integrity_checklist_derived_from_real_data(test_client, rfp_with_mixed_
     assert items["compliance-score"] == "missing"       # score 50 < 70
 
     # another tenant cannot read it
-    assert test_client.get(f"/proposals/{linked}/integrity", headers=_auth(str(uuid.uuid4()))).status_code == 404
+    assert test_client.get(f"/proposals/{linked}/integrity", headers=_auth(other_tenant)).status_code == 404
 
 
 def test_tenant_isolation_and_foreign_rfp_link(test_client, rfp_with_mixed_compliance):

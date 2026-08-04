@@ -11,8 +11,11 @@ export interface User {
 
 export interface Session {
   user: User
+  /** Short-lived, kept in memory only. See lib/stores/auth-store.ts. */
   accessToken: string
-  refreshToken: string
+  // No refreshToken: it arrives as an HttpOnly cookie that script cannot read,
+  // which is the whole point — a token in this object is a token in the heap,
+  // reachable by anything running on the page (GAP_ANALYSIS §2.5).
   expiresAt: string
 }
 

@@ -14,13 +14,13 @@ from app.core.security import decode_token
 _bearer = HTTPBearer(auto_error=False)
 
 
-def get_current_user_id(
+def _subject_from_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> UUID:
-    """Resolves the authenticated user's id from the Authorization: Bearer token.
+    """Validates the bearer token's signature and returns its subject.
 
-    This is the tenant boundary — every protected route derives ownership from
-    the token, never from client-supplied body fields.
+    Signature only — it says nothing about whether the account still exists or
+    is still permitted to act. `get_current_user` is what decides that.
     """
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
@@ -29,8 +29,7 @@ def get_current_user_id(
             headers={"WWW-Authenticate": "Bearer"},
         )
     try:
-        subject = decode_token(credentials.credentials)
-        return UUID(subject)
+        return UUID(decode_token(credentials.credentials))
     except (jwt.PyJWTError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -39,21 +38,44 @@ def get_current_user_id(
         ) from exc
 
 
-def get_current_user(user_id: UUID = Depends(get_current_user_id)) -> dict:
-    """Loads the authenticated user's record. Roles are read from the database,
-    never from the token, so a role change takes effect on the next request
-    rather than whenever the access token happens to expire."""
+def get_current_user(user_id: UUID = Depends(_subject_from_token)) -> dict:
+    """Loads the authenticated user's record, rejecting deactivated accounts.
+
+    Roles and active status are read from the database, never from the token, so
+    both take effect on the *next request* rather than whenever the access token
+    happens to expire. `is_active` was previously consulted only at login — which
+    a user holding a live token never performs again — so switching an account
+    off did nothing at all (GAP_ANALYSIS §4.4).
+
+    This costs one indexed primary-key lookup per authenticated request. That is
+    the price of revoking a stateless JWT: the alternative is a deactivated
+    account that keeps working until its token expires, and "we can't lock this
+    person out for another quarter of an hour" is not an acceptable answer to an
+    offboarding. FastAPI caches the dependency per request, so a route that also
+    needs the role does not pay for it twice.
+    """
     # Imported here to keep the module import graph free of a service cycle.
     from app.services import user_service
 
-    user = user_service.get_user(user_id)
+    user = user_service.get_active_user(user_id)
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User no longer exists.",
+            detail="This account is no longer active.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user
+
+
+def get_current_user_id(user: dict = Depends(get_current_user)) -> UUID:
+    """The authenticated user's id — the tenant boundary.
+
+    Every protected route derives ownership from this, never from a
+    client-supplied body field. It now resolves *through* `get_current_user`, so
+    a route that only needs an id still gets the deactivation check; before, the
+    check applied only to the handful of routes that happened to need a role.
+    """
+    return UUID(user["id"])
 
 
 def require_role(*allowed: str) -> Callable[[dict], dict]:

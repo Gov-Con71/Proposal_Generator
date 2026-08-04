@@ -7,9 +7,12 @@ export const apiClient = axios.create({
   baseURL: BASE_URL,
   headers: { 'Content-Type': 'application/json' },
   timeout: 30000,
+  // Required for the HttpOnly refresh cookie to be sent to the API origin.
+  // Without it the browser silently omits the cookie and every refresh 401s.
+  withCredentials: true,
 })
 
-// Attach auth token to every request
+// Attach the in-memory access token to every request.
 apiClient.interceptors.request.use((config) => {
   const token = useAuthStore.getState().accessToken
   if (token) {
@@ -20,8 +23,9 @@ apiClient.interceptors.request.use((config) => {
 
 function toLogin() {
   useAuthStore.getState().clearSession()
-  document.cookie = 'proposalai-token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'
-  window.location.href = '/login'
+  if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+    window.location.href = '/login'
+  }
 }
 
 // Refresh tokens rotate, so two concurrent 401s must not both spend the stored
@@ -29,26 +33,45 @@ function toLogin() {
 // Share one in-flight refresh between all waiters instead.
 let refreshInFlight: Promise<string> | null = null
 
-function refreshSession(): Promise<string> {
+/**
+ * Exchanges the HttpOnly refresh cookie for a new access token.
+ *
+ * There is no token argument any more: the browser attaches the cookie, and the
+ * page cannot read it. That is the point — the credential that survives a
+ * reload is one script cannot touch.
+ */
+export function refreshSession(): Promise<string> {
   if (refreshInFlight) return refreshInFlight
 
-  const refreshToken = useAuthStore.getState().refreshToken
-  if (!refreshToken) return Promise.reject(new Error('No refresh token'))
-
   refreshInFlight = axios
-    // A bare client: apiClient would re-enter this interceptor on failure.
-    .post(`${BASE_URL}/auth/refresh`, { refreshToken })
+    // A bare client: apiClient would re-enter the response interceptor on 401.
+    .post(`${BASE_URL}/auth/refresh`, null, { withCredentials: true })
     .then((r) => {
-      const session = r.data
-      useAuthStore.getState().setSession(session)
-      document.cookie = `proposalai-token=${session.accessToken}; path=/`
-      return session.accessToken as string
+      useAuthStore.getState().setSession(r.data)
+      return r.data.accessToken as string
     })
     .finally(() => {
       refreshInFlight = null
     })
 
   return refreshInFlight
+}
+
+/**
+ * Restores the session on page load, once.
+ *
+ * The access token is memory-only now, so every reload starts signed out until
+ * this resolves. Failure is the normal signed-out path, not an error worth
+ * showing: it just means there was no valid refresh cookie.
+ */
+export async function bootstrapSession(): Promise<void> {
+  try {
+    await refreshSession()
+  } catch {
+    useAuthStore.getState().clearSession()
+  } finally {
+    useAuthStore.getState().setReady()
+  }
 }
 
 // A 401 from these means "wrong credentials" or "refresh rejected", not

@@ -299,7 +299,9 @@ def test_export_render_failure_marks_job_failed(test_client, seeded_proposal, ca
 
 
 @mock_aws
-def test_export_tenant_isolation(test_client, seeded_proposal, capture_enqueue, monkeypatch):
+def test_export_tenant_isolation(
+    test_client, seeded_proposal, capture_enqueue, monkeypatch, other_tenant
+):
     monkeypatch.setattr(settings, "use_localstack", False)
     auth = _auth(seeded_proposal["user_id"])
     job = test_client.post(
@@ -308,7 +310,7 @@ def test_export_tenant_isolation(test_client, seeded_proposal, capture_enqueue, 
     export_service.run_export_render(job["id"])
 
     # a different tenant cannot see or download the job
-    other = _auth(str(uuid.uuid4()))
+    other = _auth(other_tenant)
     assert test_client.get(f"/exports/{job['id']}", headers=other).status_code == 404
     assert test_client.get(f"/exports/{job['id']}/download", headers=other).status_code == 404
 

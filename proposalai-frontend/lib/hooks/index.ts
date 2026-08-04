@@ -128,15 +128,14 @@ const IDLE_PIPELINE: Pipeline = {
   startedAt: '',
 }
 
-/** Consecutive failed reconnects before the drop is called fatal. The browser
- *  retries on its own roughly every 3s, so this is ~15s of a dead server. */
-const MAX_RECONNECTS = 5
+/** Reconnect attempts before the drop is called fatal. Each costs a fresh
+ *  ticket plus a stream open, spaced by RECONNECT_DELAY_MS. */
+export const MAX_RECONNECTS = 5
+export const RECONNECT_DELAY_MS = 3000
 
 export function useProcessing(proposalId: string, onComplete?: () => void) {
   const [pipeline, setPipeline] = useState<Pipeline>(IDLE_PIPELINE)
   const [connectionError, setConnectionError] = useState(false)
-  const esRef = useRef<EventSource | null>(null)
-  const retriesRef = useRef(0)
 
   // Keep the latest callback without making it an effect dependency — otherwise
   // an inline arrow from the caller would tear down the stream on every render.
@@ -148,55 +147,78 @@ export function useProcessing(proposalId: string, onComplete?: () => void) {
 
     setPipeline(IDLE_PIPELINE)
     setConnectionError(false)
-    retriesRef.current = 0
 
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-    // EventSource can't set an Authorization header, so pass the JWT as a query
-    // param — the backend scopes the stream to the owning tenant when present.
-    const token = useAuthStore.getState().accessToken
-    const url = `${apiUrl}/proposals/${proposalId}/pipeline/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`
-    const es = new EventSource(url)
-    esRef.current = es
+    let es: EventSource | null = null
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let attempts = 0
+    let done = false // terminal frame seen, or the effect was torn down
 
-    es.onmessage = (e) => {
+    // Reconnection is ours to drive now, not EventSource's.
+    //
+    // The stream is authorised by a single-use ticket, so the browser's own
+    // automatic retry — which replays the identical URL — presents a spent
+    // ticket and is rejected every time. Each attempt therefore has to mint a
+    // fresh one, which means closing the socket on any error rather than
+    // letting it retry itself into a guaranteed 401.
+    async function connect() {
+      if (done) return
       try {
-        const data: Pipeline = JSON.parse(e.data)
-        setPipeline(data)
-        setConnectionError(false)
-        retriesRef.current = 0  // a frame arrived: the stream is healthy again
-        if (data.status === 'completed') {
-          es.close()
-          onCompleteRef.current?.()
-        }
+        const { ticket } = await documentsApi.streamTicket(proposalId)
+        if (done) return
+        es = new EventSource(
+          `${apiUrl}/proposals/${proposalId}/pipeline/stream?ticket=${encodeURIComponent(ticket)}`
+        )
       } catch {
-        // A single malformed frame isn't fatal; keep the stream open.
+        // Couldn't even get a ticket (signed out, 404, ticket store down).
+        scheduleRetry()
+        return
+      }
+
+      es.onmessage = (e) => {
+        try {
+          const data: Pipeline = JSON.parse(e.data)
+          setPipeline(data)
+          setConnectionError(false)
+          attempts = 0 // a frame arrived: the stream is healthy again
+          if (data.status === 'completed' || data.status === 'failed') {
+            done = true
+            es?.close()
+            if (data.status === 'completed') onCompleteRef.current?.()
+          }
+        } catch {
+          // A single malformed frame isn't fatal; keep the stream open.
+        }
+      }
+
+      // Any interruption lands here: a genuine network drop, or the server
+      // reaching its per-connection budget and closing a stream whose work is
+      // still running. Neither is fatal on its own — treating them as fatal
+      // stranded the page on an error screen for ingestions that went on to
+      // succeed — so reconnect, bounded.
+      es.onerror = () => {
+        es?.close()
+        scheduleRetry()
       }
     }
 
-    // EventSource fires `error` for *any* interruption, including the routine
-    // reconnect it performs after a clean stream end — and the server caps how
-    // long a single connection streams. Treating every error as fatal stranded
-    // the page on an error screen for ingestions that were still running and
-    // went on to succeed, with the browser's own recovery closed off.
-    es.onerror = () => {
-      // CLOSED means the browser gave up and will not retry (an HTTP error
-      // response such as 401/404/409). Genuinely fatal — say so.
-      if (es.readyState === EventSource.CLOSED) {
+    function scheduleRetry() {
+      if (done) return
+      attempts += 1
+      if (attempts > MAX_RECONNECTS) {
         setConnectionError(true)
         return
       }
-      // Otherwise CONNECTING: a retry is already in flight. Let it run, but
-      // don't spin silently forever against a server that is actually down.
-      retriesRef.current += 1
-      if (retriesRef.current > MAX_RECONNECTS) {
-        setConnectionError(true)
-        es.close()
-      }
+      timer = setTimeout(connect, RECONNECT_DELAY_MS)
     }
 
+    void connect()
+
     return () => {
-      es.close()
-      esRef.current = null
+      done = true
+      if (timer) clearTimeout(timer)
+      es?.close()
+      es = null
     }
   }, [proposalId])
 

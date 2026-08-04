@@ -73,13 +73,57 @@ class Settings(BaseSettings):
         default="dev-insecure-change-me", validation_alias="JWT_SECRET"
     )
     jwt_algorithm: str = Field(default="HS256", validation_alias="JWT_ALGORITHM")
+    # Short by design. The access token now lives only in the client's memory
+    # and is reissued from the refresh cookie, so a long lifetime buys nothing
+    # and costs revocation latency: a deactivated user keeps working until their
+    # current token expires. It was 24h when the token was persisted in
+    # localStorage and a refresh round trip was something to avoid.
     access_token_expire_minutes: int = Field(
-        default=60 * 24, validation_alias="ACCESS_TOKEN_EXPIRE_MINUTES"
+        default=15, validation_alias="ACCESS_TOKEN_EXPIRE_MINUTES"
     )
     # Refresh tokens outlive access tokens; rotation on every use bounds the
     # damage of a leaked one (see refresh_token_service).
     refresh_token_expire_days: int = Field(
         default=30, validation_alias="REFRESH_TOKEN_EXPIRE_DAYS"
+    )
+
+    # --- Refresh cookie (GAP_ANALYSIS §2.5) ---
+    # The refresh token is delivered as an HttpOnly cookie so no script can read
+    # it. Cookie attributes have to be configurable because the two supported
+    # topologies differ:
+    #
+    #   dev        localhost:3000 → localhost:8000. Different ports are still
+    #              *same-site*, so Lax works and Secure would break plain HTTP.
+    #   production app.vercel.app → api.yourdomain.com are different registrable
+    #              domains, i.e. cross-site: the cookie is dropped unless it is
+    #              SameSite=None, and None is ignored without Secure. Set
+    #              COOKIE_SAMESITE=none and COOKIE_SECURE=true there.
+    #
+    # Getting this wrong fails in one specific way — login succeeds, then every
+    # refresh 401s because the cookie was never stored. See DEPLOYMENT.md §2.
+    refresh_cookie_name: str = Field(
+        default="proposalai_refresh", validation_alias="REFRESH_COOKIE_NAME"
+    )
+    cookie_secure: bool = Field(default=False, validation_alias="COOKIE_SECURE")
+    cookie_samesite: str = Field(default="lax", validation_alias="COOKIE_SAMESITE")
+    # Empty means "host-only", which is correct unless the API and app share a
+    # parent domain and you want the cookie sent to both.
+    cookie_domain: str = Field(default="", validation_alias="COOKIE_DOMAIN")
+
+    # --- Password policy (GAP_ANALYSIS §2.4) ---
+    # 12 rather than 8: length is the only dimension that reliably resists
+    # offline cracking, and composition rules mostly produce P@ssw0rd1.
+    password_min_length: int = Field(
+        default=12, validation_alias="PASSWORD_MIN_LENGTH"
+    )
+
+    # --- SSE stream tickets (GAP_ANALYSIS §2.2) ---
+    # EventSource cannot send an Authorization header, so the stream used to take
+    # the access token in the query string, where it lands in server logs, proxy
+    # logs and Referer headers. A ticket is single-use, scoped to one proposal,
+    # and dead within this many seconds.
+    stream_ticket_ttl_seconds: int = Field(
+        default=30, validation_alias="STREAM_TICKET_TTL_SECONDS"
     )
 
     # --- Auth rate limiting (GAP_ANALYSIS §2.3) ---
@@ -97,6 +141,15 @@ class Settings(BaseSettings):
     login_failure_window_seconds: int = Field(
         default=900, validation_alias="LOGIN_FAILURE_WINDOW_SECONDS"
     )  # 15 minutes
+    # Registration is per-IP only — there is no account to key on yet, which is
+    # exactly why it was left open (§2.3). Unlike login this counts *successes*
+    # too: the abuse is bulk account creation, and every one of those succeeds.
+    register_max_per_ip: int = Field(
+        default=5, validation_alias="REGISTER_MAX_PER_IP"
+    )
+    register_window_seconds: int = Field(
+        default=3600, validation_alias="REGISTER_WINDOW_SECONDS"
+    )
 
     # --- Celery / Redis worker queue (Story 2.5) ---
     celery_broker_url: str = Field(

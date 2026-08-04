@@ -69,8 +69,13 @@ class RegisterRequest(CamelModel):
     company: str = ""
 
 
-class RefreshRequest(CamelModel):
-    refresh_token: str
+class PasswordChangeRequest(CamelModel):
+    current_password: str
+    new_password: str
+
+
+class SetActiveRequest(CamelModel):
+    is_active: bool
 
 
 class User(CamelModel):
@@ -86,7 +91,9 @@ class User(CamelModel):
 class Session(CamelModel):
     user: User
     access_token: str
-    refresh_token: str
+    # No refresh_token: it is delivered as an HttpOnly cookie so that no script
+    # can read it (GAP_ANALYSIS §2.5). Putting it here would hand it straight
+    # back to the JavaScript the cookie exists to hide it from.
     expires_at: str
 
 

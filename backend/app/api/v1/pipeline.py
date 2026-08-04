@@ -9,29 +9,31 @@ view the frontend's `useProcessing` hook renders, closing when a terminal
 snapshot (`completed`/`failed`) is sent.
 
 Auth note: the browser EventSource API cannot set an Authorization header, so
-this route takes the access token as a `?token=` query param instead of the
-bearer dependency. The token is *required* and the stream is always scoped to
-the owning tenant — treating the rfp_id itself as a capability let any
-anonymous caller read another tenant's ingestion progress.
+the stream is authorised by a **ticket** obtained from a normal, bearer-
+authenticated POST:
 
-Known limitation: a token in the query string lands in access logs, browser
-history, and Referer headers. Replacing it with a short-lived single-purpose
-stream ticket (or fetch + ReadableStream, which can set headers) is tracked
-separately in GAP_ANALYSIS.md §2.2.
+    POST /proposals/{id}/pipeline/ticket   → {"ticket": "..."}   (Authorization)
+    GET  /proposals/{id}/pipeline/stream?ticket=...              (no header)
+
+The ticket is single-use, expires in seconds, and authorises only this one
+proposal's stream — see `stream_ticket_service`. It replaces `?token=`, which
+put a full-privilege 15-minute access token into access logs, browser history
+and Referer headers (GAP_ANALYSIS.md §2.2).
 """
 
 import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
-import jwt
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
-from app.core.security import decode_token
-from app.models.contract import Pipeline, PipelineStep
+from app.core.config import settings
+from app.core.deps import get_current_user_id
+from app.models.contract import CamelModel, Pipeline, PipelineStep
 from app.services import document_service as docs
 from app.services import proposals_service
+from app.services import stream_ticket_service as tickets
 
 router = APIRouter(tags=["Documents"])
 
@@ -196,20 +198,69 @@ async def _event_stream(rfp_id: str, proposal_id: str, user_id: str):
         yield f"data: {timed_out.model_dump_json(by_alias=True)}\n\n"
 
 
+class StreamTicketResponse(CamelModel):
+    ticket: str
+    expires_in_seconds: int
+
+
+@router.post(
+    "/proposals/{proposal_id}/pipeline/ticket",
+    response_model=StreamTicketResponse,
+    summary="Mint a single-use ticket for the progress stream",
+)
+async def issue_stream_ticket(
+    proposal_id: UUID, user_id: UUID = Depends(get_current_user_id)
+) -> StreamTicketResponse:
+    """Exchanges a normal bearer credential for one scoped to this stream.
+
+    Ownership is checked *here*, on the authenticated request, so the ticket
+    itself never needs to carry authority beyond "the holder already proved they
+    own this proposal, seconds ago".
+    """
+    try:
+        await asyncio.to_thread(
+            proposals_service.rfp_for_proposal, proposal_id, user_id
+        )
+    except proposals_service.NotFoundError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found.") from exc
+    except proposals_service.NoLinkedDocumentError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "This proposal has no ingested RFP yet."
+        ) from exc
+
+    try:
+        ticket = await asyncio.to_thread(tickets.issue, user_id, proposal_id)
+    except tickets.TicketError as exc:
+        # 503, not 500: the request was valid and the dependency is down. Unlike
+        # the cache, this cannot fall back to "allow" — see the service docstring.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Progress streaming is temporarily unavailable.",
+        ) from exc
+
+    return StreamTicketResponse(
+        ticket=ticket, expires_in_seconds=settings.stream_ticket_ttl_seconds
+    )
+
+
 @router.get("/proposals/{proposal_id}/pipeline/stream")
-async def stream_pipeline(proposal_id: UUID, token: str | None = None) -> StreamingResponse:
-    # A missing or bad token is a 401, exactly as on every sibling route. It
-    # previously fell back to unscoped streaming, which meant presenting no
-    # token granted *more* access than presenting another tenant's valid one.
-    if not token:
+async def stream_pipeline(proposal_id: UUID, ticket: str | None = None) -> StreamingResponse:
+    # A missing or bad ticket is a 401, exactly as on every sibling route. This
+    # once fell back to unscoped streaming, which meant presenting no credential
+    # granted *more* access than presenting another tenant's valid one.
+    if not ticket:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
-            "A token query parameter is required for this stream.",
+            "A ticket query parameter is required for this stream.",
         )
     try:
-        user_id = decode_token(token)
-    except (jwt.PyJWTError, ValueError) as exc:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token.") from exc
+        # Redeeming is single-use and checks the ticket was issued for *this*
+        # proposal, so a ticket recovered from a log or history is already spent.
+        user_id = await asyncio.to_thread(tickets.redeem, ticket, proposal_id)
+    except tickets.TicketError as exc:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "Invalid, expired, or already-used ticket."
+        ) from exc
 
     # Resolve before streaming so an unknown proposal is a plain HTTP error the
     # client can act on, rather than a 200 stream carrying a failure frame.

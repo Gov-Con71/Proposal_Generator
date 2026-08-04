@@ -32,3 +32,35 @@ def _clear_rate_limit_counters():
     _flush()
     yield
     _flush()
+
+@pytest.fixture
+def other_tenant():
+    """A second, real user id — for tenant-isolation assertions.
+
+    Isolation tests used to mint a token for a random UUID that had no row in
+    `users`. That stopped working when deactivation checks moved onto every
+    authenticated request (GAP_ANALYSIS §4.4): an unknown subject is now a 401
+    before ownership is ever considered, so those tests were asserting against
+    the authentication boundary while believing they were testing the tenancy
+    one. A real user is what actually exercises "authenticated, but not yours".
+    """
+    import uuid as _uuid
+
+    import psycopg2
+
+    from app.core.config import settings
+
+    user_id = str(_uuid.uuid4())
+    conn = psycopg2.connect(settings.database_url)
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO users (user_id, email, password_hash, first_name, last_name) "
+            "VALUES (%s, %s, 'h', 'Other', 'Tenant');",
+            (user_id, f"other_{_uuid.uuid4().hex[:8]}@example.com"),
+        )
+    conn.close()
+    yield user_id
+    conn = psycopg2.connect(settings.database_url)
+    with conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM users WHERE user_id = %s;", (user_id,))
+    conn.close()

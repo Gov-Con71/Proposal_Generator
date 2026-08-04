@@ -70,7 +70,7 @@ def _auth(user_id: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_requirements_read_and_patch(test_client, proposal_with_requirements):
+def test_requirements_read_and_patch(test_client, proposal_with_requirements, other_tenant):
     proposal_id = proposal_with_requirements["proposal_id"]
     auth = _auth(proposal_with_requirements["user_id"])
 
@@ -92,7 +92,7 @@ def test_requirements_read_and_patch(test_client, proposal_with_requirements):
     assert patched.json()["complianceStatus"] == "addressed"
 
     # cross-tenant read -> 404
-    other = _auth(str(uuid.uuid4()))
+    other = _auth(other_tenant)
     assert test_client.get(f"/proposals/{proposal_id}/requirements", headers=other).status_code == 404
 
 

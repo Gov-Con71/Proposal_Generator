@@ -36,6 +36,36 @@ gitignored):
 
 Generate a strong `JWT_SECRET` (e.g. `openssl rand -hex 32`).
 
+### The refresh cookie, and the one setting that will catch you
+
+The refresh token is an **HttpOnly cookie**, not a value in the login response,
+so no script on the page can read it. The access token is short-lived (15
+minutes) and held only in the browser's memory.
+
+That works out of the box in development because `localhost:3000` and
+`localhost:8000` are *same-site* — different ports do not make a different site.
+In production the Vercel app and the API are different registrable domains,
+which is **cross-site**, and there the browser silently refuses to store the
+cookie unless it is `SameSite=None`, and silently ignores `SameSite=None`
+unless `Secure` is also set. So in production:
+
+```bash
+COOKIE_SAMESITE=none
+COOKIE_SECURE=true      # requires HTTPS on the API, which you want anyway
+CORS_ORIGINS=https://your-app.vercel.app   # never "*" — credentials require an exact origin
+```
+
+The failure mode if you skip this is specific and misleading: **sign-in
+succeeds**, the app works until the first access token expires, and then every
+request 401s and the user is bounced to the login page in a loop. Nothing logs
+an error, because from the server's point of view the client simply never sent
+a cookie.
+
+If the API and the app share a parent domain (`app.example.com` /
+`api.example.com`), you can instead set `COOKIE_DOMAIN=.example.com` and keep
+`SameSite=Lax`, which is the stronger configuration — prefer it when the DNS
+allows.
+
 ## 3. Database migration
 
 The schema is managed by **Alembic** (`backend/migrations/`). One command, the
@@ -167,6 +197,7 @@ All telemetry is fail-open and disabled by default without keys.
 
 - [ ] `alembic current` reports `head` against the target database; `GET /ready` returns 200.
 - [ ] `JWT_SECRET`, `GEMINI_API_KEY`, S3, Redis, DB secrets set (not defaults).
+- [ ] `COOKIE_SECURE=true` + `COOKIE_SAMESITE=none` (cross-site) or `COOKIE_DOMAIN` (shared parent) — see §2.
 - [ ] `USE_LOCALSTACK=false` with a real bucket + least-privilege IAM.
 - [ ] `CORS_ORIGINS` set to the Vercel domain (defaults to `localhost:3000`).
 - [ ] Sentry + PostHog keys configured; a test error appears in Sentry.

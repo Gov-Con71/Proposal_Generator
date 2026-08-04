@@ -20,15 +20,23 @@ export const authApi = {
 
   me: () => apiClient.get<User>('/auth/me').then((r) => r.data),
 
-  // Rotating refresh tokens: the server consumes the old one and returns a new
-  // session. Replaying a consumed token revokes every session for that user.
-  refresh: (refreshToken: string) =>
-    apiClient.post<Session>('/auth/refresh', { refreshToken }).then((r) => r.data),
+  // No token argument on refresh or logout: the refresh token is an HttpOnly
+  // cookie the browser attaches and this code cannot read. That is the point —
+  // see lib/stores/auth-store.ts. Session bootstrap goes through
+  // `bootstrapSession` in ./client, which shares one in-flight refresh.
+  refresh: () =>
+    apiClient.post<Session>('/auth/refresh').then((r) => r.data),
 
-  // Sending the refresh token lets the server actually revoke it; without it,
-  // logout would only clear client state and leave the session rotatable.
-  logout: (refreshToken?: string) =>
-    apiClient.post('/auth/logout', refreshToken ? { refreshToken } : {}).then((r) => r.data),
+  // The server revokes the cookie's token and clears the cookie; without this
+  // call, signing out would only drop client state and leave the session
+  // rotatable by anyone who still held the token.
+  logout: () => apiClient.post('/auth/logout').then((r) => r.data),
+
+  /** Change the password, which signs every session out — including this one. */
+  changePassword: (currentPassword: string, newPassword: string) =>
+    apiClient
+      .post<{ message: string }>('/auth/password', { currentPassword, newPassword })
+      .then((r) => r.data),
 }
 
 // ─── proposals.ts ────────────────────────────────────────────────────────────
@@ -89,6 +97,12 @@ export interface UploadMeta {
   naics_code?: string
 }
 
+/** Response from POST /proposals/{proposalId}/pipeline/ticket. */
+export interface StreamTicket {
+  ticket: string
+  expiresInSeconds: number
+}
+
 /** Response from POST /proposals/{proposalId}/draft. */
 export interface DraftQueued {
   proposalId: string
@@ -135,6 +149,15 @@ export const documentsApi = {
   // 409 if the RFP has no requirements yet.
   draft: (proposalId: string) =>
     apiClient.post<DraftQueued>(`/proposals/${proposalId}/draft`).then((r) => r.data),
+
+  // Mint a single-use ticket for the SSE progress stream. EventSource cannot
+  // send an Authorization header, so this authenticated POST is exchanged for a
+  // credential narrow enough to survive being in a URL: one proposal, one use,
+  // a few seconds. It replaces passing the access token as ?token=.
+  streamTicket: (proposalId: string) =>
+    apiClient
+      .post<StreamTicket>(`/proposals/${proposalId}/pipeline/ticket`)
+      .then((r) => r.data),
 
   // Read the extracted solicitation summary (GET /documents/{rfpId}/summary).
   // Supplementary/best-effort: the server returns 404 until it exists, so a

@@ -142,12 +142,12 @@ def test_profile_partial_update_preserves_other_fields(test_client, seeded_user)
     assert _profile_row_count(seeded_user) == 1
 
 
-def test_profile_is_tenant_isolated(test_client, seeded_user):
+def test_profile_is_tenant_isolated(test_client, seeded_user, other_tenant):
     # tenant A saves a profile
     test_client.put("/profile", json={"legalName": "Acme Federal LLC"}, headers=_auth(seeded_user))
 
     # a different tenant sees only their own empty default, never A's data
-    other = _auth(str(uuid.uuid4()))
+    other = _auth(other_tenant)
     body = test_client.get("/profile", headers=other).json()
     assert body["legalName"] == ""
     assert body["id"] != seeded_user
