@@ -34,11 +34,22 @@ CHECKED: dict[str, str] = {
     "Requirement": "Requirement",
     "ProposalSection": "ProposalSection",
     "ProposalSummary": "ProposalSummary",
+    # Added after `draftingStatus`/`draftingFailureReason` landed on both sides
+    # (migration 0005). The full Proposal was unchecked while its summary was,
+    # so precisely the fields this change touched were the ones nothing guarded.
+    "Proposal": "Proposal",
     "IntegrityItem": "IntegrityItem",
     "ExportJob": "ExportJob",
 }
 
-_INTERFACE_RE = re.compile(r"export\s+interface\s+(\w+)\s*\{(.*?)\n\}", re.DOTALL)
+# Captures the name, any `extends A, B` clause, and the body. The extends group
+# is why this is not a simpler pattern: without it, `export interface Proposal
+# extends ProposalSummary {` did not match *at all*, so the interface was
+# invisible to the guard rather than mismatched by it — a check that silently
+# covers nothing, which is the failure mode this whole file exists to prevent.
+_INTERFACE_RE = re.compile(
+    r"export\s+interface\s+(\w+)\s*(?:extends\s+([\w\s,]+?))?\s*\{(.*?)\n\}", re.DOTALL
+)
 # A property line: `  name?: type`. Excludes methods and index signatures.
 _FIELD_RE = re.compile(r"^\s*(\w+)\s*\??\s*:", re.MULTILINE)
 
@@ -75,11 +86,31 @@ def _collapse_nested(body: str) -> str:
 
 
 def _ts_interfaces(src: str) -> dict[str, set[str]]:
-    """Maps each exported TS interface to its top-level field names."""
-    out: dict[str, set[str]] = {}
-    for name, body in _INTERFACE_RE.findall(_strip_comments(src)):
-        out[name] = set(_FIELD_RE.findall(_collapse_nested(body)))
-    return out
+    """Maps each exported TS interface to its field names, inherited ones included.
+
+    Inheritance has to be resolved because the comparison is against OpenAPI,
+    which flattens it: Pydantic's `Proposal(ProposalSummary)` publishes one
+    schema carrying every field, so a TS `Proposal extends ProposalSummary` only
+    matches once its parent's fields are merged in.
+    """
+    own: dict[str, set[str]] = {}
+    parents: dict[str, list[str]] = {}
+    for name, extends, body in _INTERFACE_RE.findall(_strip_comments(src)):
+        own[name] = set(_FIELD_RE.findall(_collapse_nested(body)))
+        parents[name] = [p.strip() for p in extends.split(",") if p.strip()]
+
+    def resolve(name: str, seen: frozenset[str] = frozenset()) -> set[str]:
+        # `seen` guards against a cycle in the declarations rather than trusting
+        # the source to be well-formed; a RecursionError here would surface as
+        # an unrelated-looking collection error.
+        if name in seen or name not in own:
+            return set()
+        fields = set(own[name])
+        for parent in parents.get(name, []):
+            fields |= resolve(parent, seen | {name})
+        return fields
+
+    return {name: resolve(name) for name in own}
 
 
 @pytest.fixture(scope="module")
