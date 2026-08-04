@@ -5,7 +5,17 @@ Revises: 0002_sections_proposal_id
 Create Date: 2026-08-04
 
 The contract half of the re-key started in 0002. Run this only once every
-writer populates `proposal_id` — i.e. one release after 0002.
+writer populates `proposal_id`.
+
+**Decision: this ships in the same release as 0002.** Expand-then-contract
+exists to keep a *currently deployed* image working across the migration
+window, and there is no such image — production is not yet provisioned
+(GAP_ANALYSIS §3.2, DEPLOYMENT.md §5). Splitting them across releases here
+would buy compatibility with nothing, at the cost of leaving the schema in the
+half-migrated state that 0002's nullable columns exist to tolerate.
+
+This reasoning expires the moment a production database exists. See the
+expand-then-contract table in DEPLOYMENT.md §3 before pairing another one.
 
 Refuses to run rather than deleting anything. A section with no `proposal_id`
 at this point belongs to an RFP that no proposal references: unreachable through

@@ -67,11 +67,27 @@ alembic upgrade head --sql     # render SQL instead of executing (hand to a DBA)
 alembic downgrade -1           # step back one revision
 ```
 
+### Expand-then-contract
+
 The deploy workflow applies migrations in a dedicated `migrate` job, gated on
 the `production` environment and ordered after the image build. Because the
 migration lands while the previous image is still serving, schema changes must
 be **expand-then-contract**: add the new column in one release, stop reading the
 old one in the next, drop it in a third.
+
+**This applies from the first production deploy onward, and not before it.**
+Until an environment is actually serving traffic there is no old image to stay
+compatible with, so an expand and its contract may ship together. Two pairs have
+already done so, deliberately:
+
+| Expand | Contract | Shipped together because |
+|--------|----------|--------------------------|
+| `0002` (`proposal_sections.proposal_id`) | `0003` (drop `rfp_id`) | Production was not provisioned; no deployed image had ever read this schema. |
+| `0005` (`proposals.drafting_status`) | `0006` (drop drafting states from `rfp_documents`) | Same. |
+
+Once §5 is done and a production database exists, that reasoning expires: split
+every subsequent pair across releases, and say so in the revision docstring so
+the next person does not have to reconstruct the decision from the dates.
 
 `backend/init_scripts/*.sql` is frozen historical record — see the README there.
 Do not add files to it.
