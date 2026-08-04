@@ -44,7 +44,11 @@ def _auth(user_id: str) -> dict:
 
 
 def _insert_rfp_with_content(cur, user_id: str) -> str:
-    """Seeds an owned RFP + one section + one requirement; returns its rfp_id."""
+    """Seeds an owned RFP + one requirement; returns its rfp_id.
+
+    Sections are seeded by `_insert_proposal`, not here: they belong to a
+    proposal, so there is nothing to attach them to until one exists.
+    """
     rfp_id = str(uuid.uuid4())
     cur.execute(
         "INSERT INTO rfp_documents (rfp_id, uploaded_by, file_name, s3_storage_key, processing_status) "
@@ -56,20 +60,27 @@ def _insert_rfp_with_content(cur, user_id: str) -> str:
         "VALUES (%s, 'C.3.1', 'The contractor SHALL overhaul the pump.', 'Technical', 'compliant');",
         (rfp_id,),
     )
-    cur.execute(
-        "INSERT INTO proposal_sections (rfp_id, section_title, generated_draft_content, status) "
-        "VALUES (%s, 'Technical Approach', 'Our team will execute a full teardown of the pump.', 'draft');",
-        (rfp_id,),
-    )
     return rfp_id
 
 
-def _insert_proposal(cur, user_id: str, rfp_id: str | None = None, title: str = "Pump Overhaul Bid") -> str:
+def _insert_proposal(
+    cur,
+    user_id: str,
+    rfp_id: str | None = None,
+    title: str = "Pump Overhaul Bid",
+    with_section: bool = True,
+) -> str:
     proposal_id = str(uuid.uuid4())
     cur.execute(
         "INSERT INTO proposals (proposal_id, owned_by, rfp_id, title) VALUES (%s, %s, %s, %s);",
         (proposal_id, user_id, rfp_id, title),
     )
+    if with_section:
+        cur.execute(
+            "INSERT INTO proposal_sections (proposal_id, section_title, generated_draft_content, status) "
+            "VALUES (%s, 'Technical Approach', 'Our team will execute a full teardown of the pump.', 'draft');",
+            (proposal_id,),
+        )
     return proposal_id
 
 

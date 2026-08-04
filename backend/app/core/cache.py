@@ -60,8 +60,10 @@ def requirements_key(user_id, rfp_id) -> str:
     return f"reqs:{user_id}:{rfp_id}"
 
 
-def sections_key(user_id, rfp_id) -> str:
-    return f"secs:{user_id}:{rfp_id}"
+def sections_key(user_id, proposal_id) -> str:
+    # Keyed on the proposal, unlike requirements/compliance: sections belong to
+    # one proposal, so two proposals on the same RFP must not share this entry.
+    return f"secs:{user_id}:{proposal_id}"
 
 
 def compliance_key(user_id, rfp_id) -> str:

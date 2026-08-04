@@ -200,6 +200,42 @@ def rfp_for_proposal(proposal_id: UUID, user_id: UUID) -> UUID:
     return row["rfp_id"]
 
 
+def rfp_for_proposal_unscoped(proposal_id: UUID) -> UUID:
+    """Same resolution, without a tenant check — for background workers.
+
+    A Celery task runs with no request identity, so it cannot supply a user_id.
+    Callers must have authorised the proposal *before* queueing the job; the
+    drafting route does exactly that. Deliberately named so an accidental use on
+    a request path is visible at the call site.
+    """
+    row = _fetchone(
+        "SELECT rfp_id FROM proposals WHERE proposal_id = %s;", (str(proposal_id),)
+    )
+    if row is None:
+        raise NotFoundError(f"proposal {proposal_id}")
+    if row["rfp_id"] is None:
+        raise NoLinkedDocumentError(f"proposal {proposal_id} has no linked RFP")
+    return row["rfp_id"]
+
+
+def proposal_ids_for_rfp(rfp_id: UUID) -> list[UUID]:
+    """Every proposal built on one document.
+
+    Used by background writers that change document-level content and have to
+    evict the per-proposal caches derived from it. Unscoped for the same reason
+    as `rfp_for_proposal_unscoped`: workers have no request identity.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT proposal_id FROM proposals WHERE rfp_id = %s;", (str(rfp_id),)
+            )
+            return [row["proposal_id"] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def create_proposal(user_id: UUID, payload: ProposalCreate) -> Proposal:
     data = payload.model_dump(exclude_none=True)
     rfp_id = _resolve_rfp_link(data.pop("document_id", None), user_id)

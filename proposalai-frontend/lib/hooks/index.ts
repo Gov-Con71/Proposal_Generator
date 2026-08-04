@@ -250,11 +250,13 @@ export function useGenerateDraft(rfpId: string, proposalId: string) {
   const [error, setError] = useState<string | null>(null)
 
   async function generate() {
-    if (!isValidId(rfpId)) return
+    // Drafting is queued per proposal; progress is still polled on the document
+    // behind it, so both ids are required.
+    if (!isValidId(rfpId) || !isValidId(proposalId)) return
     setError(null)
     setStatus('drafting')
     try {
-      await documentsApi.draft(rfpId)
+      await documentsApi.draft(proposalId)
       // Poll until the worker finishes ('drafted') or fails ('draft_failed').
       const startedAt = Date.now()
       let doc = await documentsApi.status(rfpId)
@@ -265,7 +267,11 @@ export function useGenerateDraft(rfpId: string, proposalId: string) {
         await new Promise((r) => setTimeout(r, 3000))
         doc = await documentsApi.status(rfpId)
       }
-      if (doc.processingStatus === 'draft_failed') throw new Error('Draft generation failed.')
+      // The server now records *why* it failed; show that instead of a generic
+      // message, which is the difference between "retry" and "fix your config".
+      if (doc.processingStatus === 'draft_failed') {
+        throw new Error(doc.failureReason || 'Draft generation failed.')
+      }
       qc.invalidateQueries({ queryKey: ['sections', proposalId] })
       setStatus('idle')
     } catch (e) {

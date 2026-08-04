@@ -56,15 +56,39 @@ def create_rfp_document(uploaded_by: UUID, file_name: str, s3_key: str) -> UUID:
     return rfp_id
 
 
-def update_status(rfp_id: UUID, status: str) -> None:
-    """Advances the processing_status of a document (pending/parsing/completed/failed)."""
+_FAILURE_STATUSES = {"failed", "draft_failed"}
+_REASON_MAX_CHARS = 500
+
+
+def failure_reason(exc: Exception) -> str:
+    """A short, user-facing explanation to store against a failed document.
+
+    Kept to the exception's type and message: enough for a reader to tell a
+    provider/config problem from a bad document, without pasting a traceback —
+    or anything that might carry a key or the customer's document text — into a
+    field the UI renders.
+    """
+    detail = str(exc).strip() or exc.__class__.__name__
+    if len(detail) > _REASON_MAX_CHARS:
+        detail = detail[:_REASON_MAX_CHARS].rstrip() + "…"
+    return f"{exc.__class__.__name__}: {detail}"
+
+
+def update_status(rfp_id: UUID, status: str, failure_reason: str | None = None) -> None:
+    """Advances the processing_status of a document (pending/parsing/completed/failed).
+
+    `failure_reason` records *why* a document failed, so the UI can distinguish a
+    retired model or an expired key from a corrupt PDF. Any non-failure status
+    clears it, so a successful re-analysis does not leave the previous run's
+    error displayed against a document that now works.
+    """
     conn = get_connection()
     try:
         with conn, conn.cursor() as cur:
             cur.execute(
-                "UPDATE rfp_documents SET processing_status = %s, updated_at = NOW() "
-                "WHERE rfp_id = %s;",
-                (status, str(rfp_id)),
+                "UPDATE rfp_documents SET processing_status = %s, failure_reason = %s, "
+                "updated_at = NOW() WHERE rfp_id = %s;",
+                (status, failure_reason if status in _FAILURE_STATUSES else None, str(rfp_id)),
             )
     finally:
         conn.close()
@@ -76,7 +100,8 @@ def get_document(rfp_id: UUID) -> dict:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT rfp_id, uploaded_by, file_name, s3_storage_key, processing_status "
+                "SELECT rfp_id, uploaded_by, file_name, s3_storage_key, processing_status, "
+                "failure_reason "
                 "FROM rfp_documents WHERE rfp_id = %s;",
                 (str(rfp_id),),
             )
@@ -91,6 +116,7 @@ def get_document(rfp_id: UUID) -> dict:
         "file_name": row[2],
         "s3_storage_key": row[3],
         "processing_status": row[4],
+        "failure_reason": row[5],
     }
 
 
@@ -181,7 +207,7 @@ def get_requirements(rfp_id: UUID) -> list[dict]:
 
 
 def insert_proposal_section(
-    rfp_id: UUID,
+    proposal_id: UUID,
     section_title: str,
     content: str,
     requirement_id: UUID | None = None,
@@ -189,6 +215,9 @@ def insert_proposal_section(
     review_notes: str | None = None,
 ) -> UUID:
     """Inserts one drafted proposal section and returns its id.
+
+    Keyed on the *proposal*, not the document: drafting the same RFP for two
+    bids must produce two independent sets of sections.
 
     `requirement_id` is the *primary* requirement the section answers (the schema
     links one section → one requirement); a section may cover several, tracked in
@@ -204,13 +233,13 @@ def insert_proposal_section(
             cur.execute(
                 """
                 INSERT INTO proposal_sections
-                    (section_id, rfp_id, requirement_id, section_title,
+                    (section_id, proposal_id, requirement_id, section_title,
                      generated_draft_content, status, review_notes)
                 VALUES (%s, %s, %s, %s, %s, %s, %s);
                 """,
                 (
                     str(section_id),
-                    str(rfp_id),
+                    str(proposal_id),
                     str(requirement_id) if requirement_id else None,
                     section_title,
                     content,
@@ -221,7 +250,7 @@ def insert_proposal_section(
     finally:
         conn.close()
     logger.info(
-        "Inserted proposal_section %s (%s) for rfp_document %s", section_id, status, rfp_id
+        "Inserted proposal_section %s (%s) for proposal %s", section_id, status, proposal_id
     )
     return section_id
 

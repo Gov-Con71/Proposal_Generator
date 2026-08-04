@@ -87,6 +87,8 @@ def get_integrity(
     if not proposal.document_id:  # no linked RFP yet → nothing verified
         return compliance_service.empty_integrity()
     try:
-        return compliance_service.build_integrity(UUID(proposal.document_id), user_id)
+        return compliance_service.build_integrity(
+            UUID(proposal.document_id), proposal_id, user_id
+        )
     except ws.NotFoundError:
         return compliance_service.empty_integrity()

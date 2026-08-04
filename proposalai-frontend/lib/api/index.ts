@@ -71,6 +71,18 @@ export interface DocumentStatus {
   fileName: string
   processingStatus: string
   requirementsCount: number
+  /** Why ingestion or drafting failed, when processingStatus is 'failed' or
+   *  'draft_failed'. Null otherwise. Lets the UI distinguish a provider/config
+   *  problem from an unreadable document instead of just saying "failed". */
+  failureReason?: string | null
+}
+
+/** Response from POST /proposals/{proposalId}/draft. */
+export interface DraftQueued {
+  proposalId: string
+  rfpId: string
+  processingStatus: string
+  requirementsCount: number
 }
 
 export const documentsApi = {
@@ -91,12 +103,13 @@ export const documentsApi = {
   status: (rfpId: string) =>
     apiClient.get<DocumentStatus>(`/documents/${rfpId}`).then((r) => r.data),
 
-  // Kick off the full drafting agent (POST /documents/{rfpId}/draft). Queues the
-  // worker and returns the document with processingStatus 'drafting'; poll
-  // status() until it becomes 'drafted' (or 'draft_failed'). 409 if the RFP has
-  // no extracted requirements yet.
-  draft: (rfpId: string) =>
-    apiClient.post<DocumentStatus>(`/documents/${rfpId}/draft`).then((r) => r.data),
+  // Kick off the full drafting agent (POST /proposals/{proposalId}/draft).
+  // Addressed by proposal, not document: drafting writes that proposal's own
+  // sections, and one RFP can back several proposals. Queues the worker and
+  // returns processingStatus 'drafting'; poll status(rfpId) until it becomes
+  // 'drafted' (or 'draft_failed'). 409 if the RFP has no requirements yet.
+  draft: (proposalId: string) =>
+    apiClient.post<DraftQueued>(`/proposals/${proposalId}/draft`).then((r) => r.data),
 
   // Read the extracted solicitation summary (GET /documents/{rfpId}/summary).
   // Supplementary/best-effort: the server returns 404 until it exists, so a

@@ -18,6 +18,7 @@ from uuid import UUID
 
 from app.core import cache
 from app.services import document_service as docs
+from app.services import proposals_service
 from app.services.compliance_extractor import run_extraction
 from app.services.document_parser import DocumentParseError, parse_to_markdown
 from app.services.guardrails import sanitize_matrix, sanitize_solicitation_summary
@@ -104,20 +105,30 @@ async def run_ingestion(rfp_id: UUID) -> int:
         # successful extraction. The worker writes straight to the DB, so it
         # must evict what the API cached on its behalf.
         owner = document["uploaded_by"]
+        # Sections are cached per *proposal* now, so evicting one rfp-keyed entry
+        # would miss them all. Replacing the matrix clears section→requirement
+        # links (ON DELETE SET NULL), so every proposal on this document has a
+        # stale sections entry to drop.
         cache.cache_delete(
             cache.requirements_key(owner, rfp_id),
             cache.compliance_key(owner, rfp_id),
-            cache.sections_key(owner, rfp_id),
+            *(
+                cache.sections_key(owner, pid)
+                for pid in proposals_service.proposal_ids_for_rfp(rfp_id)
+            ),
         )
 
         logger.info("Ingestion complete: rfp=%s requirements=%d", rfp_id, count)
         return count
-    except DocumentParseError:
-        docs.update_status(rfp_id, "failed")
+    # The reason is persisted, not just logged: without it the UI can only say
+    # "failed", and a retired model name reads identically to a corrupt upload —
+    # which is how a config typo went days misdiagnosed (GAP_ANALYSIS §1.1).
+    except DocumentParseError as exc:
+        docs.update_status(rfp_id, "failed", f"Could not read the document: {exc}")
         logger.exception("Ingestion failed (parse) for rfp=%s", rfp_id)
         raise
-    except Exception:
-        docs.update_status(rfp_id, "failed")
+    except Exception as exc:
+        docs.update_status(rfp_id, "failed", docs.failure_reason(exc))
         logger.exception("Ingestion failed for rfp=%s", rfp_id)
         raise
     finally:

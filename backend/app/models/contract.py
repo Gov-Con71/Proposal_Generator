@@ -162,7 +162,9 @@ class AIFlag(CamelModel):
 
 class ProposalSection(CamelModel):
     id: str
-    document_id: str  # the rfp_id this section is drafted against; see Requirement
+    # Sections belong to the proposal, not the document behind it — two
+    # proposals answering one RFP each own their own drafts.
+    proposal_id: str
     title: str
     content: str
     status: SectionStatus

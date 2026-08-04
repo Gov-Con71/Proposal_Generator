@@ -35,7 +35,8 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
   const generate = useGenerateSection(id)
   const saveSection = useSaveSection(id)
 
-  // The drafting agent is keyed on the rfp_id, which is the proposal's documentId.
+  // Drafting is queued against this proposal (its sections are its own), but
+  // progress is polled on the document behind it, whose id is documentId.
   const proposal = useProposal(id)
   const rfpId = proposal.data?.documentId ?? ''
   const draft = useGenerateDraft(rfpId, id)

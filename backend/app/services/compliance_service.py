@@ -61,13 +61,17 @@ def empty_integrity() -> list[IntegrityItem]:
     return [IntegrityItem(id=cid, label=label, status="missing") for cid, label in _INTEGRITY_LABELS]
 
 
-def build_integrity(rfp_id: UUID, user_id: UUID) -> list[IntegrityItem]:
+def build_integrity(rfp_id: UUID, proposal_id: UUID, user_id: UUID) -> list[IntegrityItem]:
     """Derives the pre-export checklist from the real matrix + sections.
 
-    Raises ws.NotFoundError if the rfp is missing or not owned by the tenant.
+    Takes both ids because the two halves are scoped differently: the compliance
+    matrix belongs to the document (shared by every proposal on it), the drafted
+    sections to this proposal alone.
+
+    Raises ws.NotFoundError if either is missing or not owned by the tenant.
     """
     matrix = build_matrix(rfp_id, user_id)
-    sections = ws.list_sections(rfp_id, user_id)
+    sections = ws.list_sections(proposal_id, user_id)
     c = matrix.counts
 
     if c.all == 0:

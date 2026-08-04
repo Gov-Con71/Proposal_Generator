@@ -207,3 +207,63 @@ def test_upload_to_requirements_end_to_end(test_client, seeded_user, monkeypatch
     count_again = ingestion.run_ingestion_sync(rfp_id)
     assert count_again == 2
     assert _count_requirements(rfp_id) == 2  # still 2 total, not 4
+
+
+@mock_aws
+def test_failed_ingestion_records_why(test_client, seeded_user, monkeypatch):
+    """A failed document carries a readable reason, not just the word 'failed'.
+
+    Without it the UI cannot separate a provider/config fault from an unreadable
+    upload — which is how a retired model name was misdiagnosed as a billing
+    problem for days (GAP_ANALYSIS §1.1).
+    """
+    # S3Storage provisions the bucket itself; moto intercepts it.
+    monkeypatch.setattr(settings, "use_localstack", False)
+
+    from app.api.v1 import documents as documents_mod
+
+    monkeypatch.setattr(
+        documents_mod.celery_app, "send_task", lambda name, args=None, **kw: None
+    )
+    token, _ = create_access_token(seeded_user)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    rfp_id = test_client.post(
+        "/documents/upload",
+        files={"file": ("rfp.txt", b"SHALL do the thing.", "text/plain")},
+        headers=auth,
+    ).json()["rfpId"]
+
+    # Stand in for the real failure this exists to explain: a model the provider
+    # no longer serves.
+    async def boom(_markdown):
+        raise RuntimeError("404 model 'text-embedding-004' not found")
+
+    monkeypatch.setattr(ingestion, "run_extraction", boom)
+
+    with pytest.raises(RuntimeError):
+        ingestion.run_ingestion_sync(rfp_id)
+
+    status = test_client.get(f"/documents/{rfp_id}", headers=auth).json()
+    assert status["processingStatus"] == "failed"
+    assert "text-embedding-004" in status["failureReason"]
+    assert status["failureReason"].startswith("RuntimeError:")
+
+    # A successful re-run must clear it, or the UI shows a stale error against a
+    # document that now works.
+    async def fine(_markdown):
+        return ComplianceMatrix(requirements=[])
+
+    monkeypatch.setattr(ingestion, "run_extraction", fine)
+    monkeypatch.setattr(
+        ingestion, "run_solicitation_extraction", lambda _m: _async_none()
+    )
+    ingestion.run_ingestion_sync(rfp_id)
+
+    status = test_client.get(f"/documents/{rfp_id}", headers=auth).json()
+    assert status["processingStatus"] == "completed"
+    assert status["failureReason"] is None
+
+
+async def _async_none():
+    return None

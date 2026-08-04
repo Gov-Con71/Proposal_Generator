@@ -139,8 +139,10 @@ export interface AIFlag {
 
 export interface ProposalSection {
   id: string
-  /** The RFP this section is drafted against (an rfp_id). */
-  documentId: string
+  /** The proposal that owns this section. Sections are per-proposal work
+   *  product, not per-document: two proposals answering one RFP each keep
+   *  their own drafts. */
+  proposalId: string
   title: string
   content: string
   status: SectionStatus

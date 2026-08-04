@@ -2,7 +2,12 @@
 
 Reads the real `extracted_requirements` produced by Sprint 2 ingestion and the
 editable `proposal_sections`, mapping DB rows to the frontend contract shapes.
-All ownership is resolved by joining back to `rfp_documents.uploaded_by`.
+
+Ownership is resolved differently for the two, because they are scoped
+differently: requirements are properties of the *document* (two proposals
+answering one RFP share them, by design) and resolve through
+`rfp_documents.uploaded_by`; sections are work product belonging to a single
+*proposal* and resolve through `proposals.owned_by`.
 """
 
 import logging
@@ -24,7 +29,17 @@ class NotFoundError(Exception):
 
 _FRONT_STATUSES = {"addressed", "partial", "missing", "na"}
 _DB_STATUS_MAP = {"pending": "missing", "compliant": "addressed", "exception": "partial"}
-_CATEGORY_MAP = {"technical": "technical", "security": "security", "past performance": "compliance"}
+_CATEGORY_MAP = {
+    "technical": "technical",
+    "security": "security",
+    "past performance": "compliance",
+    # Sections L and M. The frontend vocabulary has no dedicated term for either,
+    # so they map to their nearest sense — without these they would fall through
+    # to the "technical" default and read to a reviewer as work to perform rather
+    # than as rules governing the proposal.
+    "instruction": "admin",
+    "evaluation criteria": "compliance",
+}
 _VALID_CATEGORIES = {
     "scope", "technical", "testing", "quality_assurance", "packaging", "marking",
     "financial", "legal", "compliance", "personnel", "reporting", "security",
@@ -61,6 +76,16 @@ def assert_rfp_owner(rfp_id: UUID, user_id: UUID) -> None:
     row = _fetchone("SELECT uploaded_by FROM rfp_documents WHERE rfp_id = %s;", (str(rfp_id),))
     if row is None or str(row["uploaded_by"]) != str(user_id):
         raise NotFoundError(f"rfp {rfp_id}")
+
+
+def assert_proposal_owner(proposal_id: UUID, user_id: UUID) -> None:
+    """Sections are proposal-scoped, so their tenancy comes from the proposal
+    rather than from the document behind it."""
+    row = _fetchone(
+        "SELECT owned_by FROM proposals WHERE proposal_id = %s;", (str(proposal_id),)
+    )
+    if row is None or str(row["owned_by"]) != str(user_id):
+        raise NotFoundError(f"proposal {proposal_id}")
 
 
 # --- requirements -----------------------------------------------------------
@@ -176,7 +201,7 @@ def _to_section(row: dict) -> ProposalSection:
     status = row.get("status") or ("empty" if not content else "draft")
     return ProposalSection(
         id=str(row["section_id"]),
-        document_id=str(row["rfp_id"]),
+        proposal_id=str(row["proposal_id"]),
         title=row["section_title"],
         content=content,
         status=status,
@@ -192,20 +217,20 @@ def _to_section(row: dict) -> ProposalSection:
 
 
 _SECTION_COLS = (
-    "section_id, rfp_id, requirement_id, section_title, generated_draft_content, "
+    "section_id, proposal_id, requirement_id, section_title, generated_draft_content, "
     "status, review_notes, created_at, updated_at"
 )
 
 
-def list_sections(rfp_id: UUID, user_id: UUID) -> list[ProposalSection]:
-    assert_rfp_owner(rfp_id, user_id)
+def list_sections(proposal_id: UUID, user_id: UUID) -> list[ProposalSection]:
+    assert_proposal_owner(proposal_id, user_id)
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 f"SELECT {_SECTION_COLS} FROM proposal_sections "
-                "WHERE rfp_id = %s ORDER BY created_at;",
-                (str(rfp_id),),
+                "WHERE proposal_id = %s ORDER BY created_at;",
+                (str(proposal_id),),
             )
             rows = cur.fetchall()
     finally:
@@ -214,14 +239,18 @@ def list_sections(rfp_id: UUID, user_id: UUID) -> list[ProposalSection]:
 
 
 def _section_row(section_id: UUID, user_id: UUID) -> dict:
+    # Ownership comes from the owning proposal. It used to be read from the
+    # document (`rfp_documents.uploaded_by`), which gave every proposal built on
+    # one RFP the same answer.
     row = _fetchone(
-        "SELECT s.section_id, s.rfp_id, s.requirement_id, s.section_title, "
-        "s.generated_draft_content, s.status, s.created_at, s.updated_at, d.uploaded_by "
-        "FROM proposal_sections s JOIN rfp_documents d ON d.rfp_id = s.rfp_id "
+        "SELECT s.section_id, s.proposal_id, s.requirement_id, s.section_title, "
+        "s.generated_draft_content, s.status, s.review_notes, s.created_at, s.updated_at, "
+        "p.owned_by "
+        "FROM proposal_sections s JOIN proposals p ON p.proposal_id = s.proposal_id "
         "WHERE s.section_id = %s;",
         (str(section_id),),
     )
-    if row is None or str(row["uploaded_by"]) != str(user_id):
+    if row is None or str(row["owned_by"]) != str(user_id):
         raise NotFoundError(f"section {section_id}")
     return row
 
@@ -230,15 +259,17 @@ def get_section(section_id: UUID, user_id: UUID) -> ProposalSection:
     return _to_section(_section_row(section_id, user_id))
 
 
-def create_section(rfp_id: UUID, user_id: UUID, title: str, requirement_id: str | None) -> ProposalSection:
-    assert_rfp_owner(rfp_id, user_id)
+def create_section(
+    proposal_id: UUID, user_id: UUID, title: str, requirement_id: str | None
+) -> ProposalSection:
+    assert_proposal_owner(proposal_id, user_id)
     conn = get_connection()
     try:
         with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "INSERT INTO proposal_sections (rfp_id, requirement_id, section_title, status) "
+                "INSERT INTO proposal_sections (proposal_id, requirement_id, section_title, status) "
                 f"VALUES (%s, %s, %s, 'empty') RETURNING {_SECTION_COLS};",
-                (str(rfp_id), requirement_id, title),
+                (str(proposal_id), requirement_id, title),
             )
             row = cur.fetchone()
     finally:
