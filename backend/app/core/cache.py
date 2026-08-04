@@ -3,6 +3,26 @@
 A tiny, fail-open JSON cache for hot read endpoints. Every operation is wrapped
 so that a Redis outage degrades to a cache miss rather than an error — caching
 must never break correctness. Keys are always tenant-scoped by the caller.
+
+**The invariant: every writer of a cached entity must evict every key derived
+from it — including the writers that have no request context.**
+
+Fail-open is what makes a missed eviction so expensive: there is no error to
+notice. The API layer evicts on its own mutations, which is easy to remember
+because the eviction sits next to the write. The Celery workers are the trap —
+they write straight to the database, so nothing on the request path can evict
+for them:
+
+    reqs:{user}:{rfp}         ingestion worker · requirement PATCH/DELETE
+    compliance:{user}:{rfp}   (derived from requirements — same writers)
+    secs:{user}:{proposal}    drafting agent · section create/update/approve/
+                              regenerate/generate
+
+That is not hypothetical. The ingestion worker shipped without its eviction and
+served a stale empty requirement list, with a 200, for a full TTL after every
+successful run (GAP_ANALYSIS §1.3); the drafting agent then repeated it. Both
+are covered by `tests/test_cache_invalidation.py` — extend it when you add a
+key or a writer, because nothing else will tell you.
 """
 
 import json
