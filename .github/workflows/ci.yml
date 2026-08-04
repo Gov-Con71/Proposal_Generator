@@ -45,17 +45,21 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt
 
-      - name: Apply database schema (init order)
+      - name: Apply database schema (Alembic)
+        working-directory: backend
+        # The same command the deploy job runs against production. CI used to
+        # psql the init_scripts/*.sql glob directly, which meant the schema path
+        # exercised here was not the one that ships — a migration could pass CI
+        # and still be missing from a real deployment.
+        run: alembic upgrade head
+
+      - name: Verify migrations are reversible
+        working-directory: backend
+        # A downgrade that was never run is a downgrade that does not work. This
+        # is the only place it is cheap to find out.
         run: |
-          sudo apt-get update && sudo apt-get install -y postgresql-client
-          # Apply every migration in filename order — the same order Postgres
-          # uses for docker-entrypoint-initdb.d, so CI matches a fresh container.
-          # Globbing (rather than a hand-written list) means a new sprint's
-          # migration can't be silently missed here.
-          for f in backend/init_scripts/*.sql; do
-            echo "--- applying $f"
-            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
-          done
+          alembic downgrade base
+          alembic upgrade head
 
       - name: Run tests
         working-directory: backend

@@ -5,6 +5,7 @@ python-multipart==0.0.9
 sentry-sdk[fastapi]==2.9.0
 psycopg2-binary==2.9.10
 sqlalchemy==2.0.30
+alembic==1.13.2
 pgvector==0.3.1
 pydantic-settings==2.2.1
 pytest==8.2.1

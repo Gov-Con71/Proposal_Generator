@@ -38,15 +38,43 @@ Generate a strong `JWT_SECRET` (e.g. `openssl rand -hex 32`).
 
 ## 3. Database migration
 
-The schema is plain SQL applied in order (no migration framework yet). Locally,
-Docker runs these automatically via `docker-entrypoint-initdb.d`. In production
-apply them once against the target database:
+The schema is managed by **Alembic** (`backend/migrations/`). One command, the
+same one CI and the deploy workflow run:
 
 ```bash
-psql "$DATABASE_URL" -f backend/init_scripts/init_schema.sql
-psql "$DATABASE_URL" -f backend/init_scripts/rag_schema.sql   # pgvector + history + section.status
-psql "$DATABASE_URL" -f backend/init_scripts/tuning.sql       # indexes + ANALYZE
+cd backend
+alembic upgrade head
 ```
+
+`DATABASE_URL` is the only input — `migrations/env.py` reads it through the
+app's own settings object, so a migration can only ever target the database the
+app itself would talk to. There is no URL in `alembic.ini` to get out of sync.
+
+**An existing database** (a pre-Alembic environment, or a dev container whose
+`init_scripts` already ran) is adopted once, without applying anything:
+
+```bash
+alembic stamp 0001_baseline
+alembic current                # → 0001_baseline (head)
+```
+
+**Useful checks:**
+
+```bash
+alembic current                # what this database believes it is at
+alembic history --verbose      # the full revision chain
+alembic upgrade head --sql     # render SQL instead of executing (hand to a DBA)
+alembic downgrade -1           # step back one revision
+```
+
+The deploy workflow applies migrations in a dedicated `migrate` job, gated on
+the `production` environment and ordered after the image build. Because the
+migration lands while the previous image is still serving, schema changes must
+be **expand-then-contract**: add the new column in one release, stop reading the
+old one in the next, drop it in a third.
+
+`backend/init_scripts/*.sql` is frozen historical record — see the README there.
+Do not add files to it.
 
 ## 4. Local development
 
@@ -121,7 +149,7 @@ All telemetry is fail-open and disabled by default without keys.
 
 ## 9. Closed alpha checklist (Story 5.5)
 
-- [ ] Schema applied; `GET /ready` returns 200 in the target environment.
+- [ ] `alembic current` reports `head` against the target database; `GET /ready` returns 200.
 - [ ] `JWT_SECRET`, `GEMINI_API_KEY`, S3, Redis, DB secrets set (not defaults).
 - [ ] `USE_LOCALSTACK=false` with a real bucket + least-privilege IAM.
 - [ ] `CORS_ORIGINS` set to the Vercel domain (defaults to `localhost:3000`).
@@ -132,6 +160,6 @@ All telemetry is fail-open and disabled by default without keys.
 
 ## 10. Known follow-ups
 
-- No migration framework yet (raw SQL applied in order). Consider Alembic as the
-  schema grows.
+- `DATABASE_URL` must be set as a repository/environment secret for the deploy
+  workflow's `migrate` job, or the deploy fails at that step by design.
 - `/metrics` is unauthenticated — keep it off the public internet (network ACL).
