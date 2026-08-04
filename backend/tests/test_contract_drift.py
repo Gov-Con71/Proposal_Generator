@@ -48,14 +48,37 @@ def _strip_comments(src: str) -> str:
     return re.sub(r"//[^\n]*", "", src)
 
 
+def _collapse_nested(body: str) -> str:
+    """Removes the contents of nested object literals, keeping the field itself.
+
+    `administrative: { solicitation_number: Citation }` collapses to
+    `administrative: `, so the flat field regex sees one field named
+    `administrative` and none of the inner names.
+
+    The parser used to assert the contract file stayed flat. `SolicitationSummary`
+    then landed with nested literals, and because the assert runs in a fixture it
+    turned every parameterised case into a collection *error* — so the guard
+    stopped comparing anything at all, in exactly the silent way it exists to
+    prevent.
+    """
+    out, depth = [], 0
+    for ch in body:
+        if ch == "{":
+            depth += 1
+            continue
+        if ch == "}":
+            depth = max(0, depth - 1)
+            continue
+        if depth == 0:
+            out.append(ch)
+    return "".join(out)
+
+
 def _ts_interfaces(src: str) -> dict[str, set[str]]:
-    """Maps each exported TS interface to its field names."""
+    """Maps each exported TS interface to its top-level field names."""
     out: dict[str, set[str]] = {}
     for name, body in _INTERFACE_RE.findall(_strip_comments(src)):
-        # Nested object literals would break the flat field regex; the contract
-        # file is intentionally flat, so assert that stays true.
-        assert "{" not in body, f"{name} has a nested object literal; update this parser"
-        out[name] = set(_FIELD_RE.findall(body))
+        out[name] = set(_FIELD_RE.findall(_collapse_nested(body)))
     return out
 
 
