@@ -91,7 +91,13 @@ def get_job(user_id: UUID, job_id: str) -> ExportJob | None:
             )
             row = cur.fetchone()
     except Exception as exc:  # noqa: BLE001 — malformed (non-UUID) job_id → treat as missing
-        logger.debug("get_job lookup failed for %s: %s", job_id, exc)
+        # Warning, not debug: a malformed id is the expected case, but a real
+        # database failure lands here too and is reported to the caller as a
+        # plain 404. Without a line, "the export vanished" and "the database is
+        # down" are the same observation.
+        logger.warning(
+            "get_job lookup failed for %s (%s): %s", job_id, type(exc).__name__, exc
+        )
         return None
     finally:
         conn.close()

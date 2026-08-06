@@ -45,9 +45,19 @@ def _elapsed_ms(start: float) -> float:
 
 
 def _record(model: str, in_tokens: int, out_tokens: int, latency_ms: float, ok: bool) -> None:
+    # Also emitted as structured fields, not just interpolated prose: this is
+    # the line you aggregate to answer "which model is slow" or "when did the
+    # error rate change", and prose can only be grepped, not grouped.
     logger.info(
         "llm_call model=%s in_tokens=%d out_tokens=%d latency_ms=%.1f ok=%s",
         model, in_tokens, out_tokens, latency_ms, ok,
+        extra={
+            "llm_model": model,
+            "tokens_in": in_tokens,
+            "tokens_out": out_tokens,
+            "latency_ms": round(latency_ms, 1),
+            "ok": ok,
+        },
     )
     if not settings.telemetry_enabled:
         return
@@ -61,7 +71,9 @@ def _record(model: str, in_tokens: int, out_tokens: int, latency_ms: float, ok: 
         pipe.hincrbyfloat(_H_LATENCY, model, latency_ms)
         pipe.execute()
     except Exception as exc:  # noqa: BLE001 — telemetry is best-effort
-        logger.debug("telemetry record skipped: %s", exc)
+        # WARNING, not DEBUG: this failing means /metrics is quietly lying
+        # about spend and error rates, which is worse than it being absent.
+        logger.warning("telemetry record skipped (%s): %s", type(exc).__name__, exc)
 
 
 def record_response(model: str, response, start: float) -> None:

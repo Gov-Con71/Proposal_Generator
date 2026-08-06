@@ -1,8 +1,18 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1 import documents
+
+# Logging is configured at import, before anything else in the application is
+# touched, so that even a failure while wiring up the routers is reported in
+# the normal format. Uvicorn has already installed its own configuration by the
+# time this module is imported, which is exactly why ours can take precedence.
+from app.core.logging import configure_logging
+
+configure_logging(service="api")
+
+from app.api.v1 import documents  # noqa: E402 — must follow configure_logging
 from app.api.v1 import auth
 from app.api.v1 import history
 from app.api.v1 import workspace
@@ -13,16 +23,19 @@ from app.api.v1 import pipeline
 from app.api.v1 import monitoring
 from app.api.v1 import proposals_crud
 from app.core.config import settings
+from app.core.error_reporting import init_sentry
+from app.core.middleware import (
+    REQUEST_ID_HEADER,
+    RequestContextMiddleware,
+    install_exception_handlers,
+)
+
+logger = logging.getLogger(__name__)
 
 # --- Error reporting (Story 5.4) — no-op unless SENTRY_DSN is configured ---
-if settings.sentry_dsn:
-    import sentry_sdk
-
-    sentry_sdk.init(
-        dsn=settings.sentry_dsn,
-        environment=settings.environment,
-        traces_sample_rate=0.1,
-    )
+# Shared with the Celery worker now: this used to be inline here, so the worker
+# — which runs ingestion and drafting — reported nothing at all.
+init_sentry(service="api")
 
 DESCRIPTION = """
 Interactive API contract for the AI Proposal Platform.
@@ -53,8 +66,14 @@ async def lifespan(_app: FastAPI):
     """
     from app.core.startup_checks import run_startup_checks
 
+    logger.info(
+        "API starting: env=%s log_level=%s",
+        settings.environment,
+        settings.log_level,
+    )
     run_startup_checks()
     yield
+    logger.info("API shutting down")
 
 
 app = FastAPI(
@@ -71,7 +90,18 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Without this the browser hides the correlation id from the very client
+    # that needs to quote it: cross-origin JS can only read allow-listed
+    # response headers, and the frontend is on a different origin.
+    expose_headers=[REQUEST_ID_HEADER],
 )
+
+# Added last, so it wraps CORS and therefore *everything*: a request rejected
+# before it reaches a route still gets an id and a log line. Starlette applies
+# user middleware outermost-last.
+app.add_middleware(RequestContextMiddleware)
+
+install_exception_handlers(app)
 
 # --- Operational endpoints (health/ready/metrics) ---
 app.include_router(monitoring.router)

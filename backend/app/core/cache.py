@@ -27,12 +27,47 @@ key or a writer, because nothing else will tell you.
 
 import json
 import logging
+import time
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 _client = None
+
+# Fail-open used to mean fail-silent: every failure below was logged at DEBUG,
+# and DEBUG was never emitted. That is exactly how the ingestion worker ran for
+# weeks with no CACHE_URL, unable to reach Redis at all, serving stale empty
+# requirement lists with a 200 and no error anywhere (GAP_ANALYSIS §1.3).
+#
+# WARNING is the right level — a dependency is unreachable — but an outage
+# would then log on every request. So the first failure is reported
+# immediately, and repeats are collapsed to one line per interval carrying the
+# suppressed count, which keeps a total misconfiguration loud and a blip cheap.
+_DEGRADED_LOG_INTERVAL_SECONDS = 60.0
+_last_warned_at = 0.0
+_suppressed = 0
+
+
+def _warn_degraded(operation: str, key: str, exc: Exception) -> None:
+    global _last_warned_at, _suppressed
+
+    now = time.monotonic()
+    if now - _last_warned_at < _DEGRADED_LOG_INTERVAL_SECONDS:
+        _suppressed += 1
+        logger.debug("cache %s degraded (%s): %s", operation, key, exc)
+        return
+
+    logger.warning(
+        "cache unavailable — serving uncached (%s on %s): %s%s",
+        operation,
+        key,
+        exc,
+        f" [+{_suppressed} similar suppressed]" if _suppressed else "",
+        extra={"cache_operation": operation, "suppressed": _suppressed},
+    )
+    _last_warned_at = now
+    _suppressed = 0
 
 
 def _redis():
@@ -52,7 +87,7 @@ def cache_get(key: str):
         raw = _redis().get(key)
         return json.loads(raw) if raw else None
     except Exception as exc:  # noqa: BLE001 — cache is best-effort
-        logger.debug("cache_get miss (%s): %s", key, exc)
+        _warn_degraded("get", key, exc)
         return None
 
 
@@ -62,7 +97,7 @@ def cache_set(key: str, value, ttl: int | None = None) -> None:
     try:
         _redis().set(key, json.dumps(value), ex=ttl or settings.cache_ttl_seconds)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("cache_set skip (%s): %s", key, exc)
+        _warn_degraded("set", key, exc)
 
 
 def cache_delete(*keys: str) -> None:
@@ -71,7 +106,9 @@ def cache_delete(*keys: str) -> None:
     try:
         _redis().delete(*keys)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("cache_delete skip (%s): %s", keys, exc)
+        # The most expensive of the three to lose silently: a missed eviction
+        # serves stale data with a 200 for a full TTL.
+        _warn_degraded("delete", ",".join(keys), exc)
 
 
 # --- key builders (tenant-scoped) ------------------------------------------

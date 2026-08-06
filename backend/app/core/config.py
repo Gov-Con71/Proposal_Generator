@@ -192,6 +192,22 @@ class Settings(BaseSettings):
     sentry_dsn: str = Field(default="", validation_alias="SENTRY_DSN")
     environment: str = Field(default="development", validation_alias="ENVIRONMENT")
 
+    # --- Logging ---
+    # INFO, not WARNING: the pipeline's progress lines ("Ingestion start",
+    # "Ingestion complete: requirements=%d", per-section drafting) are all INFO,
+    # and they are the trail you follow to a root cause. Dropping them is how
+    # this application spent its life logging nothing.
+    log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
+    # "json" | "console"; empty means decide from ENVIRONMENT (json in
+    # production, console elsewhere). See app/core/logging.py.
+    log_format: str = Field(default="", validation_alias="LOG_FORMAT")
+    # Logged request/response bodies are the usual way secrets reach a log
+    # aggregator, so this is off by default and never logs bodies — only the
+    # request line, status, duration and identifiers.
+    log_request_headers: bool = Field(
+        default=False, validation_alias="LOG_REQUEST_HEADERS"
+    )
+
     # Comma-separated allowed CORS origins (set to the Vercel domain in prod).
     cors_origins: str = Field(
         default="http://localhost:3000", validation_alias="CORS_ORIGINS"
