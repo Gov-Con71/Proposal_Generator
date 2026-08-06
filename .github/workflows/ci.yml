@@ -45,17 +45,21 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt
 
-      - name: Apply database schema (init order)
+      - name: Apply database schema (Alembic)
+        working-directory: backend
+        # The same command the deploy job runs against production. CI used to
+        # psql the init_scripts/*.sql glob directly, which meant the schema path
+        # exercised here was not the one that ships — a migration could pass CI
+        # and still be missing from a real deployment.
+        run: alembic upgrade head
+
+      - name: Verify migrations are reversible
+        working-directory: backend
+        # A downgrade that was never run is a downgrade that does not work. This
+        # is the only place it is cheap to find out.
         run: |
-          sudo apt-get update && sudo apt-get install -y postgresql-client
-          # Apply every migration in filename order — the same order Postgres
-          # uses for docker-entrypoint-initdb.d, so CI matches a fresh container.
-          # Globbing (rather than a hand-written list) means a new sprint's
-          # migration can't be silently missed here.
-          for f in backend/init_scripts/*.sql; do
-            echo "--- applying $f"
-            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
-          done
+          alembic downgrade base
+          alembic upgrade head
 
       - name: Run tests
         working-directory: backend
@@ -69,7 +73,7 @@ jobs:
         run: pytest -q
 
   frontend:
-    name: Frontend — typecheck + build
+    name: Frontend — typecheck + test + build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -89,5 +93,106 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # Ordered before the build: a failing unit test should not wait on a full
+      # Next production compile to report itself.
+      - name: Unit tests
+        run: npm test
+
       - name: Build
         run: npm run build
+
+  e2e:
+    name: E2E — auth smoke
+    runs-on: ubuntu-latest
+    # A browser test is slow and needs the whole stack, so it runs only once the
+    # cheap checks agree there is something worth testing.
+    needs: [backend, frontend]
+    services:
+      postgres:
+        image: ankane/pgvector:latest
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: rfp_proposal_db
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/rfp_proposal_db
+      CACHE_URL: redis://localhost:6379/2
+      TELEMETRY_ENABLED: "false"
+      GEMINI_API_KEY: dummy-key-e2e-does-not-generate
+      JWT_SECRET: e2e-only-secret-not-used-anywhere-else
+      # The app runs on :3000 and the API on :8000 — same site, different ports,
+      # so the default Lax cookie works. This job cannot prove the production
+      # cross-site configuration (SameSite=None + Secure, DEPLOYMENT.md §2);
+      # only a real HTTPS deployment can.
+      CORS_ORIGINS: http://localhost:3000
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: proposalai-frontend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Apply database schema
+        working-directory: backend
+        run: alembic upgrade head
+
+      - name: Start the API
+        working-directory: backend
+        run: |
+          uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8000/ready > /dev/null && exit 0
+            sleep 1
+          done
+          echo "API did not become ready"; exit 1
+
+      - name: Install frontend dependencies
+        working-directory: proposalai-frontend
+        run: npm ci
+
+      - name: Build and start the app
+        working-directory: proposalai-frontend
+        run: |
+          npm run build
+          npm start -- --port 3000 &
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:3000/login > /dev/null && exit 0
+            sleep 1
+          done
+          echo "App did not become ready"; exit 1
+
+      - name: Install Playwright browser
+        working-directory: proposalai-frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Run smoke tests
+        working-directory: proposalai-frontend
+        run: npm run test:e2e
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-trace
+          path: proposalai-frontend/test-results/
+          retention-days: 7

@@ -125,3 +125,86 @@ def get_user(user_id: UUID) -> dict | None:
     finally:
         conn.close()
     return _row_to_user(row) if row else None
+
+
+def change_password(user_id: UUID, current: str, new: str) -> None:
+    """Verifies the current password and replaces it.
+
+    The current password is required even though the caller is already
+    authenticated: it is what stops a stolen access token — or an unattended
+    logged-in browser — from being turned into permanent account ownership.
+
+    Callers are expected to revoke the user's refresh tokens afterwards; that is
+    left to the route so this stays a pure persistence concern.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT password_hash, is_active FROM users WHERE user_id = %s;",
+                (str(user_id),),
+            )
+            row = cur.fetchone()
+            if row is None or not row.get("is_active", True):
+                raise InvalidCredentialsError(str(user_id))
+            if not verify_password(current, row["password_hash"]):
+                raise InvalidCredentialsError(str(user_id))
+            cur.execute(
+                "UPDATE users SET password_hash = %s, updated_at = NOW() "
+                "WHERE user_id = %s;",
+                (hash_password(new), str(user_id)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info("Password changed for user %s", user_id)
+
+
+def set_active(user_id: UUID, is_active: bool) -> dict:
+    """Activates or deactivates an account. Returns the updated user.
+
+    `users.is_active` has been read on every login since Sprint 7 and written by
+    nothing (GAP_ANALYSIS §4.4) — an account could be created but never shut
+    off. Deactivation only bites on the *next* token check, so the caller also
+    revokes refresh tokens; with a 15-minute access token that bounds a
+    deactivated user's remaining access to one token lifetime.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"UPDATE users SET is_active = %s, updated_at = NOW() "
+                f"WHERE user_id = %s RETURNING {_USER_COLS};",
+                (is_active, str(user_id)),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    if row is None:
+        return {}
+    logger.info("User %s is_active set to %s", user_id, is_active)
+    return _row_to_user(row)
+
+
+def get_active_user(user_id: UUID) -> dict | None:
+    """Like `get_user`, but returns None for a deactivated account.
+
+    One query rather than a get-then-check, because this runs on every
+    authenticated request that needs a role. Deactivation previously took effect
+    only at the next *login*, which a user with a live token never performs —
+    so an account could be switched off and keep working indefinitely.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"SELECT {_USER_COLS}, is_active FROM users WHERE user_id = %s;",
+                (str(user_id),),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None or not row.get("is_active", True):
+        return None
+    return _row_to_user(row)

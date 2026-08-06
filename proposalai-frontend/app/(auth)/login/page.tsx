@@ -23,9 +23,10 @@ export default function LoginPage() {
     setLoading(true)
     try {
       const session = await authApi.login(email, password)
+      // setSession also sets the route-guard marker cookie. The session's
+      // real credential is the HttpOnly cookie the server just set, which
+      // this code deliberately cannot read.
       setSession(session)
-      // Cookie lets the route-guard (proxy.ts) see the session server-side.
-      document.cookie = `proposalai-token=${session.accessToken}; path=/`
       router.push('/dashboard')
     } catch (err) {
       const status = (err as { response?: { status?: number } }).response?.status

@@ -52,6 +52,7 @@ def _null_summary() -> SolicitationSummary:
             page_limits=[], required_volumes_or_sections=[],
         ),
         technical_core=TechnicalCore(primary_objective=c(), key_deliverables=[]),
+        evaluation_factors=[], instructions_to_offerors=[],
     )
 
 
@@ -176,13 +177,27 @@ def test_upload_to_requirements_end_to_end(test_client, seeded_user, monkeypatch
     # --- Sprint 8: the solicitation summary was extracted and stored as JSONB ---
     summary = _fetch_summary(rfp_id)
     assert summary is not None
-    assert set(summary) == {"administrative", "deadlines", "submission_requirements", "technical_core"}
+    assert set(summary) == {
+        "administrative",
+        "deadlines",
+        "submission_requirements",
+        "technical_core",
+        "evaluation_factors",
+        "instructions_to_offerors",
+    }
 
     # --- Sprint 8: the summary is readable via the API in its snake_case schema ---
     sum_resp = test_client.get(f"/documents/{rfp_id}/summary", headers=auth)
     assert sum_resp.status_code == 200, sum_resp.text
     body = sum_resp.json()
-    assert set(body) == {"administrative", "deadlines", "submission_requirements", "technical_core"}
+    assert set(body) == {
+        "administrative",
+        "deadlines",
+        "submission_requirements",
+        "technical_core",
+        "evaluation_factors",
+        "instructions_to_offerors",
+    }
     # snake_case citation shape is preserved verbatim (not camelCased)
     assert body["administrative"]["solicitation_number"] == {"value": None, "source_quote": None}
     # unknown / cross-tenant document is a 404, not a leak
@@ -192,3 +207,105 @@ def test_upload_to_requirements_end_to_end(test_client, seeded_user, monkeypatch
     count_again = ingestion.run_ingestion_sync(rfp_id)
     assert count_again == 2
     assert _count_requirements(rfp_id) == 2  # still 2 total, not 4
+
+
+@mock_aws
+def test_upload_persists_the_metadata_form(test_client, seeded_user, monkeypatch):
+    """The upload form's bid metadata reaches the proposal it creates.
+
+    Every one of these fields was collected by the UI and silently dropped —
+    the endpoint took the file alone (GAP_ANALYSIS §4.2).
+    """
+    # S3Storage provisions the bucket itself; moto intercepts it.
+    monkeypatch.setattr(settings, "use_localstack", False)
+
+    from app.api.v1 import documents as documents_mod
+
+    monkeypatch.setattr(
+        documents_mod.celery_app, "send_task", lambda name, args=None, **kw: None
+    )
+    token, _ = create_access_token(seeded_user)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    resp = test_client.post(
+        "/documents/upload",
+        files={"file": ("rfp.txt", b"SHALL do the thing.", "text/plain")},
+        data={
+            "title": "Pump Overhaul Bid",
+            "agency": "Defense Logistics Agency",
+            "solicitation_number": "SPE8EC-26-R-0042",
+            "due_date": "2026-09-30",
+            "contract_type": "ffp",
+            "naics_code": "336413",
+        },
+        headers=auth,
+    )
+    assert resp.status_code == 202, resp.text
+
+    proposal = test_client.get(f"/proposals/{resp.json()['proposalId']}", headers=auth).json()
+    assert proposal["title"] == "Pump Overhaul Bid"
+    assert proposal["agency"] == "Defense Logistics Agency"
+    assert proposal["solicitationNumber"] == "SPE8EC-26-R-0042"
+    assert proposal["dueDate"] == "2026-09-30"
+    assert proposal["contractType"] == "ffp"
+    assert proposal["naicsCode"] == "336413"
+
+
+@mock_aws
+def test_failed_ingestion_records_why(test_client, seeded_user, monkeypatch):
+    """A failed document carries a readable reason, not just the word 'failed'.
+
+    Without it the UI cannot separate a provider/config fault from an unreadable
+    upload — which is how a retired model name was misdiagnosed as a billing
+    problem for days (GAP_ANALYSIS §1.1).
+    """
+    # S3Storage provisions the bucket itself; moto intercepts it.
+    monkeypatch.setattr(settings, "use_localstack", False)
+
+    from app.api.v1 import documents as documents_mod
+
+    monkeypatch.setattr(
+        documents_mod.celery_app, "send_task", lambda name, args=None, **kw: None
+    )
+    token, _ = create_access_token(seeded_user)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    rfp_id = test_client.post(
+        "/documents/upload",
+        files={"file": ("rfp.txt", b"SHALL do the thing.", "text/plain")},
+        headers=auth,
+    ).json()["rfpId"]
+
+    # Stand in for the real failure this exists to explain: a model the provider
+    # no longer serves.
+    async def boom(_markdown):
+        raise RuntimeError("404 model 'text-embedding-004' not found")
+
+    monkeypatch.setattr(ingestion, "run_extraction", boom)
+
+    with pytest.raises(RuntimeError):
+        ingestion.run_ingestion_sync(rfp_id)
+
+    status = test_client.get(f"/documents/{rfp_id}", headers=auth).json()
+    assert status["processingStatus"] == "failed"
+    assert "text-embedding-004" in status["failureReason"]
+    assert status["failureReason"].startswith("RuntimeError:")
+
+    # A successful re-run must clear it, or the UI shows a stale error against a
+    # document that now works.
+    async def fine(_markdown):
+        return ComplianceMatrix(requirements=[])
+
+    monkeypatch.setattr(ingestion, "run_extraction", fine)
+    monkeypatch.setattr(
+        ingestion, "run_solicitation_extraction", lambda _m: _async_none()
+    )
+    ingestion.run_ingestion_sync(rfp_id)
+
+    status = test_client.get(f"/documents/{rfp_id}", headers=auth).json()
+    assert status["processingStatus"] == "completed"
+    assert status["failureReason"] is None
+
+
+async def _async_none():
+    return None

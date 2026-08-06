@@ -11,8 +11,11 @@ export interface User {
 
 export interface Session {
   user: User
+  /** Short-lived, kept in memory only. See lib/stores/auth-store.ts. */
   accessToken: string
-  refreshToken: string
+  // No refreshToken: it arrives as an HttpOnly cookie that script cannot read,
+  // which is the whole point — a token in this object is a token in the heap,
+  // reachable by anything running on the page (GAP_ANALYSIS §2.5).
   expiresAt: string
 }
 
@@ -80,6 +83,12 @@ export interface Proposal extends ProposalSummary {
   tone: string
   pageLimit: number
   documentId: string
+  /** The AI writer's lifecycle for *this* proposal. Lived on the document until
+   *  migration 0005, where two proposals answering one RFP overwrote each
+   *  other's progress. Poll this, not the document's processingStatus. */
+  draftingStatus: 'idle' | 'drafting' | 'drafted' | 'draft_failed'
+  /** Why the last draft failed, when draftingStatus is 'draft_failed'. */
+  draftingFailureReason?: string | null
   totalRequirements: number
   addressedRequirements: number
   partialRequirements: number
@@ -139,8 +148,10 @@ export interface AIFlag {
 
 export interface ProposalSection {
   id: string
-  /** The RFP this section is drafted against (an rfp_id). */
-  documentId: string
+  /** The proposal that owns this section. Sections are per-proposal work
+   *  product, not per-document: two proposals answering one RFP each keep
+   *  their own drafts. */
+  proposalId: string
   title: string
   content: string
   status: SectionStatus

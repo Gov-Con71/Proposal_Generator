@@ -70,7 +70,7 @@ def _auth(user_id: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_requirements_read_and_patch(test_client, proposal_with_requirements):
+def test_requirements_read_and_patch(test_client, proposal_with_requirements, other_tenant):
     proposal_id = proposal_with_requirements["proposal_id"]
     auth = _auth(proposal_with_requirements["user_id"])
 
@@ -92,7 +92,7 @@ def test_requirements_read_and_patch(test_client, proposal_with_requirements):
     assert patched.json()["complianceStatus"] == "addressed"
 
     # cross-tenant read -> 404
-    other = _auth(str(uuid.uuid4()))
+    other = _auth(other_tenant)
     assert test_client.get(f"/proposals/{proposal_id}/requirements", headers=other).status_code == 404
 
 
@@ -151,3 +151,122 @@ def test_generate_section_uses_draft_writer(monkeypatch, test_client, proposal_w
     sections = test_client.get(f"/proposals/{proposal_id}/sections", headers=auth)
     assert sections.status_code == 200
     assert len(sections.json()) == 1
+
+
+def test_two_proposals_on_one_rfp_keep_separate_sections(
+    monkeypatch, test_client, proposal_with_requirements
+):
+    """Sections must not leak between proposals answering the same RFP.
+
+    They were keyed on rfp_id, so a second bid on the same solicitation saw —
+    and could edit — the first one's drafts, with nothing in the UI to suggest
+    the content was shared. Silent by nature: every response is a well-formed
+    200 and the sections look like they belong. Only a test that builds the
+    second proposal catches it.
+    """
+    from app.api.v1 import workspace as wsapi
+
+    monkeypatch.setattr(
+        wsapi.draft_writer,
+        "generate_draft",
+        lambda uid, text, top_k=5: {"content": "First bid's approach.", "citations": []},
+    )
+
+    user_id = proposal_with_requirements["user_id"]
+    rfp_id = proposal_with_requirements["rfp_id"]
+    first = proposal_with_requirements["proposal_id"]
+    auth = _auth(user_id)
+
+    # A second proposal answering the *same* RFP — a re-bid, or a variant.
+    second = str(uuid.uuid4())
+    conn = _conn()
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO proposals (proposal_id, owned_by, rfp_id, title) "
+            "VALUES (%s, %s, %s, 'Second Bid, Same RFP');",
+            (second, user_id, rfp_id),
+        )
+    conn.close()
+
+    req_id = test_client.get(f"/proposals/{first}/requirements", headers=auth).json()[0]["id"]
+    created = test_client.post(
+        f"/proposals/{first}/sections/generate", json={"requirementId": req_id}, headers=auth
+    )
+    assert created.status_code == 201
+    assert created.json()["proposalId"] == first
+
+    # Both proposals share the RFP's requirements...
+    assert len(test_client.get(f"/proposals/{second}/requirements", headers=auth).json()) == 2
+    # ...but the draft belongs to the first one alone.
+    assert test_client.get(f"/proposals/{first}/sections", headers=auth).json() != []
+    assert test_client.get(f"/proposals/{second}/sections", headers=auth).json() == []
+
+
+def test_queueing_a_draft_marks_only_that_proposal(
+    monkeypatch, test_client, proposal_with_requirements
+):
+    """POST /proposals/{id}/draft reports on the proposal, not the document.
+
+    The route sets 'drafting' itself rather than leaving it to the worker: a
+    client that polls immediately after the 202 would otherwise read whatever
+    the previous run left behind and conclude the draft was already done.
+    """
+    from app.api.v1 import workspace as wsapi
+
+    queued: list[tuple] = []
+    monkeypatch.setattr(
+        wsapi.celery_app, "send_task", lambda name, args=None, **kw: queued.append((name, args))
+    )
+
+    user_id = proposal_with_requirements["user_id"]
+    rfp_id = proposal_with_requirements["rfp_id"]
+    first = proposal_with_requirements["proposal_id"]
+    auth = _auth(user_id)
+
+    second = str(uuid.uuid4())
+    conn = _conn()
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO proposals (proposal_id, owned_by, rfp_id, title) "
+            "VALUES (%s, %s, %s, 'Competing Bid');",
+            (second, user_id, rfp_id),
+        )
+    conn.close()
+
+    resp = test_client.post(f"/proposals/{first}/draft", headers=auth)
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["draftingStatus"] == "drafting"
+    assert body["proposalId"] == first
+    assert queued == [("draft_proposal", [first])]
+
+    assert test_client.get(f"/proposals/{first}", headers=auth).json()["draftingStatus"] == "drafting"
+    # The competing bid is untouched, and so is the document behind both.
+    assert test_client.get(f"/proposals/{second}", headers=auth).json()["draftingStatus"] == "idle"
+    doc = test_client.get(f"/documents/{rfp_id}", headers=auth).json()
+    assert doc["processingStatus"] == "completed"
+
+
+def test_drafting_a_proposal_with_no_requirements_is_a_409(
+    monkeypatch, test_client, proposal_with_requirements
+):
+    """Drafting is grounded in the extracted matrix, so an un-ingested RFP is a
+    conflict rather than a queued job that would fail minutes later."""
+    from app.api.v1 import workspace as wsapi
+
+    monkeypatch.setattr(wsapi.celery_app, "send_task", lambda *a, **kw: None)
+
+    user_id = proposal_with_requirements["user_id"]
+    rfp_id = proposal_with_requirements["rfp_id"]
+    proposal_id = proposal_with_requirements["proposal_id"]
+    auth = _auth(user_id)
+
+    conn = _conn()
+    with conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM extracted_requirements WHERE rfp_id = %s;", (rfp_id,))
+    conn.close()
+
+    resp = test_client.post(f"/proposals/{proposal_id}/draft", headers=auth)
+    assert resp.status_code == 409
+    # And nothing was left claiming to be in progress.
+    assert test_client.get(f"/proposals/{proposal_id}", headers=auth).json()["draftingStatus"] == "idle"

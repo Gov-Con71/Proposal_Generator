@@ -69,8 +69,13 @@ class RegisterRequest(CamelModel):
     company: str = ""
 
 
-class RefreshRequest(CamelModel):
-    refresh_token: str
+class PasswordChangeRequest(CamelModel):
+    current_password: str
+    new_password: str
+
+
+class SetActiveRequest(CamelModel):
+    is_active: bool
 
 
 class User(CamelModel):
@@ -86,7 +91,9 @@ class User(CamelModel):
 class Session(CamelModel):
     user: User
     access_token: str
-    refresh_token: str
+    # No refresh_token: it is delivered as an HttpOnly cookie so that no script
+    # can read it (GAP_ANALYSIS §2.5). Putting it here would hand it straight
+    # back to the JavaScript the cookie exists to hide it from.
     expires_at: str
 
 
@@ -130,6 +137,11 @@ class Proposal(ProposalSummary):
     tone: str
     page_limit: int
     document_id: str
+    # The AI writer's lifecycle for *this* proposal: idle | drafting | drafted |
+    # draft_failed. It lived on the document until migration 0005, where two
+    # proposals answering one RFP overwrote each other's progress.
+    drafting_status: str
+    drafting_failure_reason: Optional[str] = None
     total_requirements: int
     addressed_requirements: int
     partial_requirements: int
@@ -162,7 +174,9 @@ class AIFlag(CamelModel):
 
 class ProposalSection(CamelModel):
     id: str
-    document_id: str  # the rfp_id this section is drafted against; see Requirement
+    # Sections belong to the proposal, not the document behind it — two
+    # proposals answering one RFP each own their own drafts.
+    proposal_id: str
     title: str
     content: str
     status: SectionStatus

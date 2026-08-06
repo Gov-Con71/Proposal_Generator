@@ -42,6 +42,51 @@ jobs:
           docker push "$IMAGE:latest"
           echo "Pushed $IMAGE:$TAG"
 
+  migrate:
+    name: Database — apply migrations
+    runs-on: ubuntu-latest
+    # Ordered after the image build so a broken build never migrates the
+    # production database, and before any traffic shift so the new image never
+    # starts against a schema it predates. Deployments that add a column must
+    # therefore be expand-then-contract: the currently-running image has to
+    # tolerate the migrated schema for the window between these two steps.
+    needs: backend-image
+    permissions:
+      id-token: write
+      contents: read
+    environment: production # gates on the environment's required reviewers/secrets
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Show pending migrations
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # Logged before applying so the deployment record says what changed.
+        run: |
+          echo "Current revision:"
+          alembic current
+          echo "Plan:"
+          alembic upgrade head --sql || echo "(offline SQL render unavailable; continuing)"
+
+      - name: Apply migrations
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # A non-zero exit here fails the deploy. That is the point: the release
+        # that introduced this file shipped an ECR image against a database
+        # nothing had ever applied a schema to.
+        run: alembic upgrade head
+
   frontend-vercel:
     name: Frontend — deploy to Vercel
     runs-on: ubuntu-latest

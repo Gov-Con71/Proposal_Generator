@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
 from app.core.config import settings
 from app.core.deps import get_current_user_id, require_writer
@@ -46,6 +46,11 @@ class DocumentStatusResponse(CamelModel):
     file_name: str
     processing_status: str
     requirements_count: int
+    # Why *ingestion* failed, when processing_status is 'failed'. Without this
+    # the UI can only say "failed", and a retired model reads exactly like a
+    # corrupt PDF (GAP_ANALYSIS §1.1). A failed draft reports itself on the
+    # proposal instead (`draftingFailureReason`) — see migration 0005.
+    failure_reason: str | None = None
 
 
 def _owned_document_or_404(rfp_id: UUID, uploaded_by: UUID) -> dict:
@@ -78,6 +83,18 @@ def _spooled_size(upload: UploadFile) -> int:
 )
 async def upload_document(
     file: UploadFile = File(..., description="RFP file (PDF, DOCX, or TXT)."),
+    # Bid metadata the upload form collects. Sent as multipart fields alongside
+    # the file, because the request is already multipart — a JSON body would
+    # mean either a second round trip or a base64'd document. All optional: the
+    # form is a convenience, and ingestion fills in what the user leaves blank.
+    # Until now the form gathered every one of these and discarded them
+    # silently (GAP_ANALYSIS §4.2).
+    title: str = Form(""),
+    agency: str = Form(""),
+    solicitation_number: str = Form(""),
+    due_date: str = Form(""),
+    contract_type: str = Form(""),
+    naics_code: str = Form(""),
     uploaded_by: UUID = Depends(get_current_user_id),
 ) -> DocumentUploadResponse:
     # --- validate type (2.1 error-boundary contract) ---
@@ -122,11 +139,20 @@ async def upload_document(
 
     # --- create the proposal this upload is for ---
     # Uploading an RFP is how a proposal starts, so one is created here rather
-    # than leaving an orphan document the dashboard can never show. The title is
-    # a placeholder the user renames; ingestion fills in the rest.
+    # than leaving an orphan document the dashboard can never show. Whatever the
+    # user typed on the upload form wins; the filename is only a fallback title,
+    # and ingestion fills the rest in from the document.
     proposal = proposals.create_proposal(
         uploaded_by,
-        ProposalCreate(title=Path(safe_name).stem, document_id=str(created_id)),
+        ProposalCreate(
+            title=title.strip() or Path(safe_name).stem,
+            agency=agency.strip(),
+            solicitation_number=solicitation_number.strip(),
+            due_date=due_date.strip(),
+            contract_type=contract_type.strip(),
+            naics_code=naics_code.strip(),
+            document_id=str(created_id),
+        ),
     )
 
     # --- hand off to the async worker queue (by name; worker owns the LLM stack) ---
@@ -156,6 +182,7 @@ def get_status(
         file_name=document["file_name"],
         processing_status=document["processing_status"],
         requirements_count=docs.count_requirements(rfp_id),
+        failure_reason=document.get("failure_reason"),
     )
 
 
@@ -204,31 +231,7 @@ def reanalyze(
     )
 
 
-@router.post(
-    "/{rfp_id}/draft",
-    response_model=DocumentStatusResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Generate a full proposal draft with the AI writer agent (async)",
-    dependencies=[Depends(require_writer)],
-)
-def draft_proposal(
-    rfp_id: UUID, uploaded_by: UUID = Depends(get_current_user_id)
-) -> DocumentStatusResponse:
-    """Queues the drafting agent. Poll GET /documents/{rfp_id} for status
-    ('drafting' → 'drafted') and GET /proposals/{rfp_id}/sections for results."""
-    document = _owned_document_or_404(rfp_id, uploaded_by)
-    requirements_count = docs.count_requirements(rfp_id)
-    if requirements_count == 0:
-        # Drafting is grounded in the extracted compliance matrix.
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "No requirements extracted yet — ingest the RFP before drafting.",
-        )
-    docs.update_status(rfp_id, "drafting")
-    celery_app.send_task("draft_proposal", args=[str(rfp_id)])
-    return DocumentStatusResponse(
-        rfp_id=str(rfp_id),
-        file_name=document["file_name"],
-        processing_status="drafting",
-        requirements_count=requirements_count,
-    )
+# The drafting route moved to POST /proposals/{proposal_id}/draft (workspace.py)
+# when sections were re-keyed to the proposal. Drafting produces a proposal's own
+# sections, so it has to be told which proposal it is drafting — an rfp_id no
+# longer identifies that unambiguously.

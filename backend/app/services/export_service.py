@@ -132,7 +132,9 @@ def _assemble_doc(created_by: UUID, proposal_id: str) -> ExportDoc:
 
     try:
         rfp_id = UUID(proposal.document_id)
-        sections = ws.list_sections(rfp_id, created_by)
+        # Sections come from the proposal (its own drafts); the compliance
+        # matrix from the document behind it (shared by every proposal on it).
+        sections = ws.list_sections(UUID(proposal_id), created_by)
         matrix = compliance_service.build_matrix(rfp_id, created_by)
     except (ValueError, ws.NotFoundError):
         return ExportDoc(title=title, subtitle="No proposal content found for this tenant.")

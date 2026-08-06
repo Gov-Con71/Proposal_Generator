@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from app.core import cache
 from app.core.deps import get_current_user_id, require_writer
 from app.models.contract import (
+    CamelModel,
     GenerateSectionRequest,
     ProposalSection,
     Requirement,
@@ -27,11 +28,22 @@ from app.models.contract import (
     SectionCreate,
     SectionUpdate,
 )
+from app.services import document_service as docs
 from app.services import draft_writer, proposals_service, workspace_service as ws
+from app.worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Workspace"])
+
+
+class DraftQueuedResponse(CamelModel):
+    proposal_id: str
+    rfp_id: str
+    # The proposal's own drafting lifecycle, not the document's ingestion
+    # status — see migration 0005.
+    drafting_status: str
+    requirements_count: int
 
 
 def _guard(fn, *args):
@@ -101,17 +113,31 @@ def delete_requirement(
 # --- sections ---------------------------------------------------------------
 
 def _invalidate_sections(user_id: UUID, section: ProposalSection) -> None:
-    cache.cache_delete(cache.sections_key(user_id, section.document_id))
+    cache.cache_delete(cache.sections_key(user_id, section.proposal_id))
+
+
+def _grounding(result: dict) -> tuple[float, list[str]]:
+    """(confidence, reference tags) for a single-section RAG draft.
+
+    The same derivation the full drafting agent applies, so a section written
+    one at a time is scored on the same basis as one written by a full run.
+    """
+    citations = result.get("citations") or []
+    return (
+        draft_writer.grounding_confidence(citations),
+        draft_writer.reference_tags(citations),
+    )
 
 
 @router.get("/proposals/{proposal_id}/sections", response_model=list[ProposalSection])
 def list_sections(proposal_id: UUID, user_id: UUID = Depends(get_current_user_id)):
-    rfp_id = _rfp(proposal_id, user_id)
-    key = cache.sections_key(user_id, rfp_id)
+    # No _rfp() translation: sections are keyed on the proposal directly, so the
+    # cache entry is per-proposal too. Two proposals on one RFP must not share it.
+    key = cache.sections_key(user_id, proposal_id)
     cached = cache.cache_get(key)
     if cached is not None:
         return cached
-    result = _guard(ws.list_sections, rfp_id, user_id)
+    result = _guard(ws.list_sections, proposal_id, user_id)
     cache.cache_set(key, [s.model_dump(by_alias=True) for s in result])
     return result
 
@@ -125,8 +151,7 @@ def list_sections(proposal_id: UUID, user_id: UUID = Depends(get_current_user_id
 def create_section(
     proposal_id: UUID, payload: SectionCreate, user_id: UUID = Depends(get_current_user_id)
 ):
-    rfp_id = _rfp(proposal_id, user_id)
-    result = _guard(ws.create_section, rfp_id, user_id, payload.title, payload.requirement_id)
+    result = _guard(ws.create_section, proposal_id, user_id, payload.title, payload.requirement_id)
     _invalidate_sections(user_id, result)
     return result
 
@@ -158,9 +183,55 @@ def regenerate_section(section_id: UUID, user_id: UUID = Depends(get_current_use
     _guard(ws.get_section, section_id, user_id)  # ownership check
     requirement_text = ws.requirement_text_for_section(section_id)
     result = draft_writer.generate_draft(user_id, requirement_text)
-    section = ws.save_generated_draft(section_id, result["content"])
+    section = ws.save_generated_draft(section_id, result["content"], *_grounding(result))
     _invalidate_sections(user_id, section)
     return section
+
+
+@router.post(
+    "/proposals/{proposal_id}/draft",
+    response_model=DraftQueuedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_writer)],
+    summary="Generate a full proposal draft with the AI writer agent (async)",
+)
+def draft_proposal(
+    proposal_id: UUID, user_id: UUID = Depends(get_current_user_id)
+) -> DraftQueuedResponse:
+    """Queues the drafting agent for one proposal.
+
+    Addressed by proposal, not by document (it was `POST /documents/{rfp_id}/draft`
+    until sections became proposal-scoped): drafting writes a proposal's own
+    sections, and one RFP can back several proposals.
+
+    Poll `GET /proposals/{proposalId}` for `draftingStatus` ('drafting' →
+    'drafted', or 'draft_failed' with `draftingFailureReason`) and
+    `GET /proposals/{proposalId}/sections` for the results. That flag moved off
+    the document in migration 0005 — polling `GET /documents/{rfpId}` would
+    report whichever bid on this RFP happened to write last.
+    """
+    rfp_id = _rfp(proposal_id, user_id)  # 404/409 + ownership in one place
+    requirements_count = docs.count_requirements(rfp_id)
+    if requirements_count == 0:
+        # Drafting is grounded in the extracted compliance matrix.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "No requirements extracted yet — ingest the RFP before drafting.",
+        )
+    # Set here rather than only in the worker: between the 202 and the worker
+    # picking the job up, a client polling for 'drafting' would otherwise read
+    # the previous run's 'drafted' and stop, concluding instantly that a draft
+    # it just requested was already finished.
+    proposals_service.set_drafting_status(proposal_id, "drafting")
+    # Authorised here, before queueing: the worker resolves the proposal without
+    # a tenant check because it has no request identity.
+    celery_app.send_task("draft_proposal", args=[str(proposal_id)])
+    return DraftQueuedResponse(
+        proposal_id=str(proposal_id),
+        rfp_id=str(rfp_id),
+        drafting_status="drafting",
+        requirements_count=requirements_count,
+    )
 
 
 @router.post(
@@ -176,14 +247,15 @@ def generate_section(
 ):
     """Creates a new section for a requirement and fills it with a RAG draft."""
     rfp_id = _rfp(proposal_id, user_id)
-    # list_requirements enforces rfp ownership for this tenant.
+    # Requirements are still per-document; only the section it produces is
+    # per-proposal. list_requirements enforces rfp ownership for this tenant.
     requirements = _guard(ws.list_requirements, rfp_id, user_id)
     match = next((r for r in requirements if r.id == payload.requirement_id), None)
     if match is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Requirement not found.")
     title = payload.title or f"Response to {match.section or 'requirement'}"
-    section = ws.create_section(rfp_id, user_id, title, payload.requirement_id)
+    section = ws.create_section(proposal_id, user_id, title, payload.requirement_id)
     result = draft_writer.generate_draft(user_id, match.text)
-    section = ws.save_generated_draft(UUID(section.id), result["content"])
+    section = ws.save_generated_draft(UUID(section.id), result["content"], *_grounding(result))
     _invalidate_sections(user_id, section)
     return section

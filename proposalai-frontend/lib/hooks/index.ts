@@ -128,10 +128,14 @@ const IDLE_PIPELINE: Pipeline = {
   startedAt: '',
 }
 
+/** Reconnect attempts before the drop is called fatal. Each costs a fresh
+ *  ticket plus a stream open, spaced by RECONNECT_DELAY_MS. */
+export const MAX_RECONNECTS = 5
+export const RECONNECT_DELAY_MS = 3000
+
 export function useProcessing(proposalId: string, onComplete?: () => void) {
   const [pipeline, setPipeline] = useState<Pipeline>(IDLE_PIPELINE)
   const [connectionError, setConnectionError] = useState(false)
-  const esRef = useRef<EventSource | null>(null)
 
   // Keep the latest callback without making it an effect dependency — otherwise
   // an inline arrow from the caller would tear down the stream on every render.
@@ -145,36 +149,76 @@ export function useProcessing(proposalId: string, onComplete?: () => void) {
     setConnectionError(false)
 
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-    // EventSource can't set an Authorization header, so pass the JWT as a query
-    // param — the backend scopes the stream to the owning tenant when present.
-    const token = useAuthStore.getState().accessToken
-    const url = `${apiUrl}/proposals/${proposalId}/pipeline/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`
-    const es = new EventSource(url)
-    esRef.current = es
+    let es: EventSource | null = null
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let attempts = 0
+    let done = false // terminal frame seen, or the effect was torn down
 
-    es.onmessage = (e) => {
+    // Reconnection is ours to drive now, not EventSource's.
+    //
+    // The stream is authorised by a single-use ticket, so the browser's own
+    // automatic retry — which replays the identical URL — presents a spent
+    // ticket and is rejected every time. Each attempt therefore has to mint a
+    // fresh one, which means closing the socket on any error rather than
+    // letting it retry itself into a guaranteed 401.
+    async function connect() {
+      if (done) return
       try {
-        const data: Pipeline = JSON.parse(e.data)
-        setPipeline(data)
-        setConnectionError(false)
-        if (data.status === 'completed') {
-          es.close()
-          onCompleteRef.current?.()
-        }
+        const { ticket } = await documentsApi.streamTicket(proposalId)
+        if (done) return
+        es = new EventSource(
+          `${apiUrl}/proposals/${proposalId}/pipeline/stream?ticket=${encodeURIComponent(ticket)}`
+        )
       } catch {
-        // A single malformed frame isn't fatal; keep the stream open.
+        // Couldn't even get a ticket (signed out, 404, ticket store down).
+        scheduleRetry()
+        return
+      }
+
+      es.onmessage = (e) => {
+        try {
+          const data: Pipeline = JSON.parse(e.data)
+          setPipeline(data)
+          setConnectionError(false)
+          attempts = 0 // a frame arrived: the stream is healthy again
+          if (data.status === 'completed' || data.status === 'failed') {
+            done = true
+            es?.close()
+            if (data.status === 'completed') onCompleteRef.current?.()
+          }
+        } catch {
+          // A single malformed frame isn't fatal; keep the stream open.
+        }
+      }
+
+      // Any interruption lands here: a genuine network drop, or the server
+      // reaching its per-connection budget and closing a stream whose work is
+      // still running. Neither is fatal on its own — treating them as fatal
+      // stranded the page on an error screen for ingestions that went on to
+      // succeed — so reconnect, bounded.
+      es.onerror = () => {
+        es?.close()
+        scheduleRetry()
       }
     }
 
-    // Surface the dropped stream instead of hanging on a stale progress bar.
-    es.onerror = () => {
-      setConnectionError(true)
-      es.close()
+    function scheduleRetry() {
+      if (done) return
+      attempts += 1
+      if (attempts > MAX_RECONNECTS) {
+        setConnectionError(true)
+        return
+      }
+      timer = setTimeout(connect, RECONNECT_DELAY_MS)
     }
 
+    void connect()
+
     return () => {
-      es.close()
-      esRef.current = null
+      done = true
+      if (timer) clearTimeout(timer)
+      es?.close()
+      es = null
     }
   }, [proposalId])
 
@@ -237,36 +281,48 @@ export function useGenerateSection(proposalId: string) {
   })
 }
 
-/** Drives the full drafting agent imperatively: POST /documents/{rfpId}/draft →
- *  poll the document status until 'drafted' → refresh the sections list.
+/** Drives the full drafting agent imperatively: POST /proposals/{id}/draft →
+ *  poll the proposal's draftingStatus until 'drafted' → refresh the sections.
+ *
+ *  Everything here is keyed on the proposal. It used to trigger on the proposal
+ *  but poll the *document*, which reported whichever bid on that RFP wrote last
+ *  — so a second proposal's draft could show as finished the moment the first
+ *  one completed. Migration 0005 moved the flag onto the proposal; this follows
+ *  it, and no longer needs the rfpId at all.
  *
  *  Drafting is many LLM calls (plan → per-section draft + compliance critique),
  *  so it can take minutes on a constrained provider quota — hence the generous
- *  poll cap. `rfpId` triggers/polls; `proposalId` keys the sections cache to
- *  invalidate so the drafted sections appear. */
-export function useGenerateDraft(rfpId: string, proposalId: string) {
+ *  poll cap. */
+export function useGenerateDraft(proposalId: string) {
   const qc = useQueryClient()
   const [status, setStatus] = useState<'idle' | 'drafting' | 'failed'>('idle')
   const [error, setError] = useState<string | null>(null)
 
   async function generate() {
-    if (!isValidId(rfpId)) return
+    if (!isValidId(proposalId)) return
     setError(null)
     setStatus('drafting')
     try {
-      await documentsApi.draft(rfpId)
+      await documentsApi.draft(proposalId)
       // Poll until the worker finishes ('drafted') or fails ('draft_failed').
+      // The POST has already set 'drafting', so the first read cannot race
+      // ahead and see a previous run's terminal state.
       const startedAt = Date.now()
-      let doc = await documentsApi.status(rfpId)
-      while (doc.processingStatus === 'drafting') {
+      let proposal = await proposalsApi.get(proposalId)
+      while (proposal.draftingStatus === 'drafting') {
         if (Date.now() - startedAt > 15 * 60_000) {
           throw new Error('Drafting timed out — please try again.')
         }
         await new Promise((r) => setTimeout(r, 3000))
-        doc = await documentsApi.status(rfpId)
+        proposal = await proposalsApi.get(proposalId)
       }
-      if (doc.processingStatus === 'draft_failed') throw new Error('Draft generation failed.')
+      // The server records *why* it failed; show that instead of a generic
+      // message, which is the difference between "retry" and "fix your config".
+      if (proposal.draftingStatus === 'draft_failed') {
+        throw new Error(proposal.draftingFailureReason || 'Draft generation failed.')
+      }
       qc.invalidateQueries({ queryKey: ['sections', proposalId] })
+      qc.invalidateQueries({ queryKey: ['proposals', proposalId] })
       setStatus('idle')
     } catch (e) {
       const err = e as { response?: { data?: { detail?: string } }; message?: string }

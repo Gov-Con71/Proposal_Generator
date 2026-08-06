@@ -3,9 +3,9 @@
 A complementary extraction stage that sits alongside the compliance-matrix
 extractor (`compliance_extractor.py`). Where that shreds the RFP into a flat list
 of per-requirement rows, this pulls the *document-level* administrative, deadline,
-submission, and technical-core facts a proposal manager needs at a glance — every
-value carrying an exact `source_quote` citation, and `null` where the document is
-silent.
+submission, technical-core, and Section L/M facts a proposal manager needs at a
+glance — every value carrying an exact `source_quote` citation, and `null` where
+the document is silent.
 
 The result is a single `SolicitationSummary` object persisted as JSONB on
 `rfp_documents.solicitation_summary`. It is supplementary: ingestion treats a
@@ -38,7 +38,14 @@ _SYSTEM_PROMPT = (
     "an exact quote or section reference proving where you found it. Whenever a "
     "value is null, its source_quote must be null too.\n"
     "For the list fields (page_limits, required_volumes_or_sections, "
-    "key_deliverables), return an empty list if the document contains none."
+    "key_deliverables, evaluation_factors, instructions_to_offerors), return an "
+    "empty list if the document contains none.\n"
+    "SECTIONS L AND M: pay particular attention to 'Instructions to Offerors' "
+    "(Section L) and 'Evaluation Factors for Award' (Section M), which may appear "
+    "under those names or as an equivalent instructions/evaluation clause. Capture "
+    "every evaluation factor with its stated relative importance, and every "
+    "preparation/submission instruction — a proposal that misses these is "
+    "non-responsive regardless of technical merit."
 )
 
 
@@ -115,11 +122,45 @@ class TechnicalCore(BaseModel):
     )
 
 
+class EvaluationFactor(BaseModel):
+    """One Section M factor the government will score the proposal against."""
+
+    factor: str = Field(description="Name of the evaluation factor or subfactor.")
+    description: str = Field(description="What the government will assess under it.")
+    importance: str = Field(
+        description=(
+            "Relative importance as stated (e.g. 'significantly more important than "
+            "price', 'equally weighted'); '' if the document does not say."
+        )
+    )
+    source_quote: str = Field(description="Exact quote/reference.")
+
+
+class Instruction(BaseModel):
+    """One Section L instruction governing how the proposal must be prepared."""
+
+    instruction: str = Field(description="The preparation/submission instruction.")
+    applies_to: str = Field(
+        description="Volume/section it governs, or 'All' when proposal-wide."
+    )
+    source_quote: str = Field(description="Exact quote/reference.")
+
+
 class SolicitationSummary(BaseModel):
     administrative: Administrative
     deadlines: Deadlines
     submission_requirements: SubmissionRequirements
     technical_core: TechnicalCore
+    # Sections M and L. Non-nullable str fields with no defaults, matching
+    # PageLimit/Deliverable — a `default` in the response schema breaks Gemini,
+    # and `sanitize_solicitation_summary` drops whole items whose quote is
+    # fabricated (it keys off source_quote-without-value, which these match).
+    evaluation_factors: list[EvaluationFactor] = Field(
+        description="Section M evaluation factors; empty list if none stated."
+    )
+    instructions_to_offerors: list[Instruction] = Field(
+        description="Section L preparation/submission instructions; empty if none."
+    )
 
 
 # ---------------------------------------------------------------------------

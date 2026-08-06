@@ -20,15 +20,23 @@ export const authApi = {
 
   me: () => apiClient.get<User>('/auth/me').then((r) => r.data),
 
-  // Rotating refresh tokens: the server consumes the old one and returns a new
-  // session. Replaying a consumed token revokes every session for that user.
-  refresh: (refreshToken: string) =>
-    apiClient.post<Session>('/auth/refresh', { refreshToken }).then((r) => r.data),
+  // No token argument on refresh or logout: the refresh token is an HttpOnly
+  // cookie the browser attaches and this code cannot read. That is the point —
+  // see lib/stores/auth-store.ts. Session bootstrap goes through
+  // `bootstrapSession` in ./client, which shares one in-flight refresh.
+  refresh: () =>
+    apiClient.post<Session>('/auth/refresh').then((r) => r.data),
 
-  // Sending the refresh token lets the server actually revoke it; without it,
-  // logout would only clear client state and leave the session rotatable.
-  logout: (refreshToken?: string) =>
-    apiClient.post('/auth/logout', refreshToken ? { refreshToken } : {}).then((r) => r.data),
+  // The server revokes the cookie's token and clears the cookie; without this
+  // call, signing out would only drop client state and leave the session
+  // rotatable by anyone who still held the token.
+  logout: () => apiClient.post('/auth/logout').then((r) => r.data),
+
+  /** Change the password, which signs every session out — including this one. */
+  changePassword: (currentPassword: string, newPassword: string) =>
+    apiClient
+      .post<{ message: string }>('/auth/password', { currentPassword, newPassword })
+      .then((r) => r.data),
 }
 
 // ─── proposals.ts ────────────────────────────────────────────────────────────
@@ -71,14 +79,54 @@ export interface DocumentStatus {
   fileName: string
   processingStatus: string
   requirementsCount: number
+  /** Why ingestion or drafting failed, when processingStatus is 'failed' or
+   *  'draft_failed'. Null otherwise. Lets the UI distinguish a provider/config
+   *  problem from an unreadable document instead of just saying "failed". */
+  failureReason?: string | null
+}
+
+/** Bid metadata the upload form collects, applied to the proposal the upload
+ *  creates. Keys are the snake_case multipart field names the endpoint expects
+ *  (multipart fields are not camel-converted the way JSON bodies are). */
+export interface UploadMeta {
+  title?: string
+  agency?: string
+  solicitation_number?: string
+  due_date?: string
+  contract_type?: string
+  naics_code?: string
+}
+
+/** Response from POST /proposals/{proposalId}/pipeline/ticket. */
+export interface StreamTicket {
+  ticket: string
+  expiresInSeconds: number
+}
+
+/** Response from POST /proposals/{proposalId}/draft. */
+export interface DraftQueued {
+  proposalId: string
+  rfpId: string
+  /** The proposal's own drafting lifecycle — always 'drafting' here. */
+  draftingStatus: string
+  requirementsCount: number
 }
 
 export const documentsApi = {
   // Streams the file to POST /documents/upload. The tenant is derived from the
   // JWT the axios client attaches — no user id in the body.
-  upload: (file: File, onProgress?: (pct: number) => void) => {
+  upload: (file: File, onProgress?: (pct: number) => void, meta?: UploadMeta) => {
     const form = new FormData()
     form.append('file', file)
+    // Bid metadata from the upload form. Sent as multipart fields beside the
+    // file; the server applies whatever is filled in to the proposal it creates
+    // and leaves the rest to ingestion. Empty values are omitted rather than
+    // sent as '' so they cannot overwrite anything extraction later derives.
+    if (meta) {
+      for (const [key, value] of Object.entries(meta)) {
+        if (value) form.append(key, value)
+      }
+    }
     return apiClient.post<UploadResult>('/documents/upload', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: (e) => {
@@ -91,12 +139,25 @@ export const documentsApi = {
   status: (rfpId: string) =>
     apiClient.get<DocumentStatus>(`/documents/${rfpId}`).then((r) => r.data),
 
-  // Kick off the full drafting agent (POST /documents/{rfpId}/draft). Queues the
-  // worker and returns the document with processingStatus 'drafting'; poll
-  // status() until it becomes 'drafted' (or 'draft_failed'). 409 if the RFP has
-  // no extracted requirements yet.
-  draft: (rfpId: string) =>
-    apiClient.post<DocumentStatus>(`/documents/${rfpId}/draft`).then((r) => r.data),
+  // Kick off the full drafting agent (POST /proposals/{proposalId}/draft).
+  // Addressed by proposal, not document: drafting writes that proposal's own
+  // sections, and one RFP can back several proposals. Queues the worker and
+  // returns draftingStatus 'drafting'; poll proposalsApi.get(proposalId) until
+  // its draftingStatus becomes 'drafted' (or 'draft_failed'). Polling the
+  // *document* would report whichever bid on that RFP wrote last — the flag
+  // moved onto the proposal in migration 0005.
+  // 409 if the RFP has no requirements yet.
+  draft: (proposalId: string) =>
+    apiClient.post<DraftQueued>(`/proposals/${proposalId}/draft`).then((r) => r.data),
+
+  // Mint a single-use ticket for the SSE progress stream. EventSource cannot
+  // send an Authorization header, so this authenticated POST is exchanged for a
+  // credential narrow enough to survive being in a URL: one proposal, one use,
+  // a few seconds. It replaces passing the access token as ?token=.
+  streamTicket: (proposalId: string) =>
+    apiClient
+      .post<StreamTicket>(`/proposals/${proposalId}/pipeline/ticket`)
+      .then((r) => r.data),
 
   // Read the extracted solicitation summary (GET /documents/{rfpId}/summary).
   // Supplementary/best-effort: the server returns 404 until it exists, so a

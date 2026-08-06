@@ -39,18 +39,26 @@ def ingest_document(self, rfp_id: str) -> dict:
     default_retry_delay=10,
     acks_late=True,
 )
-def draft_proposal(self, rfp_id: str) -> dict:
-    """Runs the drafting agent for one RFP: plan → draft → critique → persist sections.
+def draft_proposal(self, proposal_id: str) -> dict:
+    """Runs the drafting agent for one proposal: plan → draft → critique → persist.
+
+    Takes a **proposal id**, not an rfp id — sections belong to the proposal, so
+    the agent has to know which one it is drafting. The API route authorises it
+    before queueing.
 
     The agent flips processing_status to 'drafting'/'drafted'/'draft_failed'; this
     task just retries transient LLM/DB hiccups.
     """
-    logger.info("Task draft_proposal received rfp_id=%s", rfp_id)
+    logger.info("Task draft_proposal received proposal_id=%s", proposal_id)
     try:
-        result = run_drafting_sync(rfp_id)
-        return {"rfp_id": rfp_id, "sections": result["sections"], "status": "drafted"}
+        result = run_drafting_sync(proposal_id)
+        return {
+            "proposal_id": proposal_id,
+            "sections": result["sections"],
+            "status": "drafted",
+        }
     except Exception as exc:
-        logger.exception("draft_proposal failed for %s", rfp_id)
+        logger.exception("draft_proposal failed for %s", proposal_id)
         raise self.retry(exc=exc)
 
 

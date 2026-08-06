@@ -47,14 +47,15 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   async function handleLogout() {
     // Revoke server-side first so the refresh token can't be rotated again;
     // clearing local state alone would leave the session alive for 30 days.
+    // No argument: the token travels as the HttpOnly cookie.
     try {
-      await authApi.logout(useAuthStore.getState().refreshToken ?? undefined)
+      await authApi.logout()
     } catch {
       // A failed revoke must not strand the user in a session they've left.
     }
+    // Clears in-memory state and the route-guard marker; the server already
+    // revoked the refresh token and expired its HttpOnly cookie.
     clearSession()
-    // Expire the route-guard cookie set at login.
-    document.cookie = 'proposalai-token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'
     router.push('/login')
   }
 

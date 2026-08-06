@@ -6,6 +6,7 @@ rejecting malformed or hallucinated content before it is persisted.
 """
 
 import logging
+import re
 
 from app.services.compliance_extractor import ComplianceMatrix, ExtractedRequirement
 
@@ -54,13 +55,84 @@ def sanitize_matrix(matrix: ComplianceMatrix) -> tuple[ComplianceMatrix, int]:
     return ComplianceMatrix(requirements=clean), rejected
 
 
-def validate_draft(content: str) -> str:
-    """Returns a trimmed draft, or raises DraftGuardrailError if unusable."""
+# Unfilled template markers. A draft carrying one of these is a partial
+# generation, not a proposal — it must never reach a reviewer as finished prose.
+_PLACEHOLDER_PATTERNS = (
+    r"\[insert[^\]]*\]",
+    r"\[your[^\]]*\]",
+    r"\[company[^\]]*\]",
+    r"\[tbd[^\]]*\]",
+    r"\bTBD\b",
+    r"\bXXX+\b",
+    r"\blorem ipsum\b",
+    r"<[a-z_ ]*placeholder[a-z_ ]*>",
+)
+
+# Content-free superlatives. The drafting system prompt bans these outright, so
+# their presence means the model ignored the instruction and is padding rather
+# than evidencing. A couple slipping through is tolerable; a pile of them is not.
+_BANNED_PHRASES = (
+    "world-class",
+    "world class",
+    "best-in-class",
+    "best in class",
+    "industry-leading",
+    "industry leading",
+    "cutting-edge",
+    "cutting edge",
+    "state-of-the-art",
+    "state of the art",
+    "seamless",
+    "leverage synergies",
+    "robust solution",
+    "passion for excellence",
+    "trusted partner",
+    "unparalleled",
+)
+_MAX_BANNED_PHRASES = 3
+
+# A section answering several requirements needs room to address each one; a
+# 200-char reply to six requirements has not engaged with them.
+_MIN_CHARS_PER_REQUIREMENT = 150
+
+
+def validate_draft(content: str, requirement_count: int = 0) -> str:
+    """Returns a trimmed draft, or raises DraftGuardrailError if unusable.
+
+    Beyond the length floor this rejects the two failure shapes that otherwise
+    reach reviewers as finished text: unfilled placeholders, and prose padded
+    with banned superlatives instead of evidence. `requirement_count` scales the
+    length floor so a token response to a multi-requirement section is caught.
+    """
     text = (content or "").strip()
     if len(text) < _MIN_DRAFT_CHARS:
         raise DraftGuardrailError(
             f"Generated draft is too short ({len(text)} chars) — refusing to save."
         )
+
+    min_chars = max(_MIN_DRAFT_CHARS, requirement_count * _MIN_CHARS_PER_REQUIREMENT)
+    if len(text) < min_chars:
+        raise DraftGuardrailError(
+            f"Generated draft is too short ({len(text)} chars) for "
+            f"{requirement_count} requirement(s); expected at least {min_chars}."
+        )
+
+    found = [p for p in _PLACEHOLDER_PATTERNS if re.search(p, text, re.IGNORECASE)]
+    if found:
+        raise DraftGuardrailError(
+            f"Generated draft contains unfilled placeholder(s) matching {found} "
+            "— refusing to save."
+        )
+
+    lowered = text.lower()
+    banned = [p for p in _BANNED_PHRASES if p in lowered]
+    if len(banned) > _MAX_BANNED_PHRASES:
+        raise DraftGuardrailError(
+            f"Generated draft is filler-heavy ({len(banned)} banned phrases: "
+            f"{banned}) — refusing to save."
+        )
+    if banned:
+        logger.info("validate_draft: draft contains banned phrase(s) %s", banned)
     return text
 
 
