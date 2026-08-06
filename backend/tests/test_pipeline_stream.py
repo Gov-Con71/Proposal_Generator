@@ -220,7 +220,13 @@ def test_stream_hides_another_tenants_proposal(test_client, seeded_user):
 
     assert foreign.status_code == 404
     assert foreign.status_code == missing.status_code
-    assert foreign.json() == missing.json()  # identical: no signal it exists
+    # Identical: no signal it exists. Compared field by field rather than whole
+    # bodies, because every error response now also carries its own `requestId`
+    # — which differs between any two requests by construction and says nothing
+    # about the resource. Comparing the whole body would only assert that
+    # correlation ids are not random.
+    assert foreign.json()["detail"] == missing.json()["detail"]
+    assert foreign.json().keys() == missing.json().keys()
     # and crucially, never the real status of the seeded document
     assert "completed" not in foreign.text
 

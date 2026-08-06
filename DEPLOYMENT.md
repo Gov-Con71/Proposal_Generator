@@ -184,14 +184,66 @@ env settings.
 
 - `GET /health` — liveness (process up).
 - `GET /ready` — readiness; 200 only when Postgres **and** Redis are reachable.
-  Wire load-balancer / ECS health checks here.
+  Wire load-balancer / ECS health checks here. A 503 body names the failing
+  dependency and its exception *type*; the full reason (host, cause) is logged,
+  not returned — this route is unauthenticated.
 - `GET /metrics` — per-model LLM call counts, token usage, avg latency, and
   estimated cost (aggregated across API + worker via Redis). Restrict at the
   network layer in production.
 - **Sentry** — set `SENTRY_DSN` (backend) and `NEXT_PUBLIC_SENTRY_DSN` (frontend).
+  Both the API **and** the Celery worker initialise it; the worker needs
+  `SENTRY_DSN` and `ENVIRONMENT` in its own environment (both compose files
+  pass them).
 - **PostHog** — set `NEXT_PUBLIC_POSTHOG_KEY` / `NEXT_PUBLIC_POSTHOG_HOST`.
 
 All telemetry is fail-open and disabled by default without keys.
+
+### Logs
+
+Configured once in `app/core/logging.py` and applied by both processes — the
+API at import of `app.main`, the worker via Celery's `setup_logging` signal.
+Everything goes to **stdout**, so `docker logs`, CloudWatch, or Loki collect it
+with no extra agent.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `LOG_LEVEL` | `INFO` | `INFO` carries the pipeline's progress trail; `DEBUG` is noisy but is what you want while reproducing one failure. |
+| `LOG_FORMAT` | *(empty)* | `json` in production, `console` elsewhere. Empty decides from `ENVIRONMENT`. |
+| `LOG_REQUEST_HEADERS` | `false` | Adds non-sensitive request headers. `Authorization` and `Cookie` are stripped even when on; bodies are never logged. |
+
+**Finding the root cause of one failure.** Every response carries an
+`X-Request-ID` header, and every error response repeats it in the body as
+`requestId`. That single id is bound for the life of the request, attached to
+any Celery task the request queues, and re-bound in the worker — so it spans
+the whole causal chain:
+
+```bash
+# One id, both processes: upload → S3 → DB → broker → worker → parse → LLM.
+docker logs fastapi_backend_app 2>&1 | grep "$REQUEST_ID"
+docker logs rfp_celery_worker  2>&1 | grep "$REQUEST_ID"
+```
+
+In JSON mode the same query is a field filter, and the identifiers are
+top-level fields rather than prose — `request_id`, `user_id`, `rfp_id`,
+`proposal_id`, `task_id`, `service`, plus `http_status` and `duration_ms` on
+the request-completion line and `llm_model` / `latency_ms` on each LLM call:
+
+```
+{"ts":"…","level":"ERROR","logger":"app.services.ingestion",
+ "msg":"Ingestion failed for rfp=…","service":"worker",
+ "request_id":"…","rfp_id":"…","task_id":"…",
+ "src":"ingestion:run_ingestion:132",
+ "error":{"type":"RuntimeError","message":"…","traceback":"…"}}
+```
+
+A client may supply its own `X-Request-ID` to correlate across a system it
+already traces; values that could forge a log line or field are rejected in
+favour of a generated one.
+
+**Alerting.** Key on level, not message text. `ERROR` from `app.request` is a
+5xx; `ERROR` from `app.api.v1.monitoring` is a failed dependency probe;
+`WARNING` from `app.core.cache` means the cache is unreachable and every read
+is going to the database.
 
 ## 9. Closed alpha checklist (Story 5.5)
 

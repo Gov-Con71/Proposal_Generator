@@ -1,8 +1,16 @@
-"""Celery tasks: the ingestion pipeline (Story 2.5) and the drafting agent (Sprint 3)."""
+"""Celery tasks: the ingestion pipeline (Story 2.5) and the drafting agent (Sprint 3).
+
+Each task binds the identifier it works on into the logging context, so every
+line the pipeline emits below it — in `ingestion`, `document_service`, the LLM
+adapter — carries that id as a queryable field without any of those modules
+needing to know about it. Combined with the request id inherited from the API
+call that queued the task, one filter reconstructs the whole run.
+"""
 
 import logging
 
 from app.agent import run_drafting_sync
+from app.core import logging as applog
 from app.services.export_service import run_export_render
 from app.services.ingestion import run_ingestion_sync
 from app.worker.celery_app import celery_app
@@ -23,12 +31,22 @@ def ingest_document(self, rfp_id: str) -> dict:
     Retries transient failures (e.g. S3/LLM hiccups); the ingestion service has
     already flagged the row 'failed' before the exception reaches us.
     """
+    applog.bind_context(rfp_id=rfp_id)
     logger.info("Task ingest_document received rfp_id=%s", rfp_id)
     try:
         count = run_ingestion_sync(rfp_id)
         return {"rfp_id": rfp_id, "requirements": count, "status": "completed"}
     except Exception as exc:
-        logger.exception("ingest_document failed for %s", rfp_id)
+        # `retries` is what distinguishes a transient hiccup from a genuine
+        # failure in the logs — without it, three lines for one document look
+        # like three separate broken uploads.
+        logger.exception(
+            "ingest_document failed for %s (attempt %d/%d)",
+            rfp_id,
+            self.request.retries + 1,
+            self.max_retries + 1,
+            extra={"retries": self.request.retries},
+        )
         raise self.retry(exc=exc)
 
 
@@ -49,6 +67,7 @@ def draft_proposal(self, proposal_id: str) -> dict:
     The agent flips processing_status to 'drafting'/'drafted'/'draft_failed'; this
     task just retries transient LLM/DB hiccups.
     """
+    applog.bind_context(proposal_id=proposal_id)
     logger.info("Task draft_proposal received proposal_id=%s", proposal_id)
     try:
         result = run_drafting_sync(proposal_id)
@@ -58,7 +77,13 @@ def draft_proposal(self, proposal_id: str) -> dict:
             "status": "drafted",
         }
     except Exception as exc:
-        logger.exception("draft_proposal failed for %s", proposal_id)
+        logger.exception(
+            "draft_proposal failed for %s (attempt %d/%d)",
+            proposal_id,
+            self.request.retries + 1,
+            self.max_retries + 1,
+            extra={"retries": self.request.retries},
+        )
         raise self.retry(exc=exc)
 
 
@@ -75,9 +100,15 @@ def render_export(self, job_id: str) -> dict:
     The export service has already flagged the row 'failed' before the
     exception reaches us; retries cover transient S3/DB hiccups.
     """
-    logger.info("Task render_export received job_id=%s", job_id)
+    logger.info("Task render_export received job_id=%s", job_id, extra={"job_id": job_id})
     try:
         return run_export_render(job_id)
     except Exception as exc:
-        logger.exception("render_export failed for %s", job_id)
+        logger.exception(
+            "render_export failed for %s (attempt %d/%d)",
+            job_id,
+            self.request.retries + 1,
+            self.max_retries + 1,
+            extra={"job_id": job_id, "retries": self.request.retries},
+        )
         raise self.retry(exc=exc)

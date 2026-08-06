@@ -93,6 +93,10 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - FEATHERLESS_API_KEY=${FEATHERLESS_API_KEY:-}
       - SENTRY_DSN=${SENTRY_DSN:-}
+      # --- Logging (see app/core/logging.py) ---
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-}
+      - LOG_REQUEST_HEADERS=${LOG_REQUEST_HEADERS:-false}
     depends_on:
       db:
         condition: service_healthy
@@ -131,6 +135,14 @@ services:
       # GEMINI_API_KEY must be provided via .env for extraction/drafting.
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - FEATHERLESS_API_KEY=${FEATHERLESS_API_KEY:-}
+      # The worker had none of these: no ENVIRONMENT, no SENTRY_DSN, and no
+      # logging configuration — so the two longest and most failure-prone paths
+      # in the system (ingestion, drafting) reported their exceptions nowhere
+      # and logged in a format nothing else used.
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-}
     depends_on:
       db:
         condition: service_healthy
