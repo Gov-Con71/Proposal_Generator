@@ -6,8 +6,9 @@ import { Card } from '@/components/ui/card'
 import { StatusDot } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { ErrorState } from '@/components/ui/state'
-import { useRequirements, useUpdateRequirement, useDeleteRequirement } from '@/lib/hooks'
+import { useProposal, useRequirements, useUpdateRequirement, useDeleteRequirement } from '@/lib/hooks'
 import { cn } from '@/lib/utils/cn'
+import { formatDateTime } from '@/lib/utils/format'
 import type { ComplianceStatus } from '@/types'
 
 const STATUS_OPTIONS: ComplianceStatus[] = ['addressed', 'partial', 'missing', 'na']
@@ -39,6 +40,12 @@ export default function CompliancePage({ params }: { params: Promise<{ id: strin
 
   // Requirements extracted by the Sprint 2 ingestion pipeline.
   const { data: requirements = [], isLoading, isError, error, refetch } = useRequirements(id)
+  // The real solicitation this matrix belongs to. The header used to hard-code
+  // "RFP-2024-USCG-4914", so every proposal's compliance matrix was labelled
+  // with the same fabricated number — the one identifier on the page that must
+  // never be wrong. Falls back to the proposal title until extraction fills it in.
+  const { data: proposal } = useProposal(id)
+  const solicitation = proposal?.solicitationNumber || proposal?.title
   const updateReq = useUpdateRequirement(id)
   const deleteReq = useDeleteRequirement(id)
   const [sortKey, setSortKey] = useState<SortKey>('number')
@@ -56,6 +63,17 @@ export default function CompliancePage({ params }: { params: Promise<{ id: strin
     missing:   requirements.filter((r) => r.complianceStatus === 'missing').length,
     na:        requirements.filter((r) => r.complianceStatus === 'na').length,
   }
+
+  // When the matrix was actually last extracted — the newest requirement's
+  // timestamp. This used to be `new Date()`, which was both meaningless (always
+  // "now", never when anything changed) and a hydration error: the server
+  // rendered one clock reading and the client another. Deriving it from
+  // client-fetched data means the server and the first client render agree
+  // (both have no data yet), so there is nothing to mismatch.
+  const lastUpdated = requirements.reduce<string | null>(
+    (latest, r) => (!latest || r.createdAt > latest ? r.createdAt : latest),
+    null
+  )
 
   const filtered = requirements.filter((r) => {
     const matchFilter = filter === 'all' || r.complianceStatus === filter
@@ -80,9 +98,17 @@ export default function CompliancePage({ params }: { params: Promise<{ id: strin
         <div>
           <h1 className="text-lg font-medium">Compliance Matrix</h1>
           <div className="flex items-center gap-2 mt-0.5">
-            <span className="text-xs text-[var(--text-secondary)] font-medium">RFP-2024-USCG-4914</span>
-            <span className="text-[var(--text-tertiary)]">·</span>
-            <span className="text-xs text-[var(--text-tertiary)]">Last updated: {new Date().toLocaleString()}</span>
+            {solicitation && (
+              <>
+                <span className="text-xs text-[var(--text-secondary)] font-medium">{solicitation}</span>
+                {lastUpdated && <span className="text-[var(--text-tertiary)]">·</span>}
+              </>
+            )}
+            {lastUpdated && (
+              <span className="text-xs text-[var(--text-tertiary)]">
+                Last updated: {formatDateTime(lastUpdated)}
+              </span>
+            )}
           </div>
         </div>
         <div className="flex gap-2">

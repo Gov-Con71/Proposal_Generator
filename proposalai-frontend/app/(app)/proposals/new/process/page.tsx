@@ -57,6 +57,30 @@ export default function ProcessPage({ searchParams }: { searchParams: Promise<{ 
     )
   }
 
+  // A failed run is a real, explained outcome — render it before the connection
+  // branch. The stream closes right after the failure frame, so the close that
+  // follows must not be allowed to overwrite this with "lost connection".
+  if (pipeline.status === 'failed') {
+    return (
+      <div className="min-h-[calc(100vh-44px)] bg-[var(--bg-secondary)] flex items-center justify-center px-4">
+        <Card className="w-full max-w-lg">
+          <ErrorState
+            title="Processing failed"
+            message={statusMsg || 'The RFP could not be processed.'}
+          />
+          <div className="flex justify-center gap-2 pb-4">
+            <Button variant="primary" size="sm" onClick={() => router.push('/proposals/new')}>
+              Upload another RFP
+            </Button>
+            <Button variant="default" size="sm" onClick={() => router.push(`/proposals/${proposal}/workspace`)}>
+              Open workspace
+            </Button>
+          </div>
+        </Card>
+      </div>
+    )
+  }
+
   if (connectionError) {
     return (
       <div className="min-h-[calc(100vh-44px)] bg-[var(--bg-secondary)] flex items-center justify-center px-4">
