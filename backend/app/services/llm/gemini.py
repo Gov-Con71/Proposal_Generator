@@ -62,6 +62,7 @@ class GeminiProvider(LLMProvider):
         model: str,
         embed_model: str,
         embed_dim: int,
+        api_key: str | None = None,
         request_timeout_ms: int | None = None,
         max_retries: int = 5,
         retry_base_seconds: float = 2.0,
@@ -69,6 +70,10 @@ class GeminiProvider(LLMProvider):
         self._model = model
         self._embed_model = embed_model
         self._embed_dim = embed_dim
+        # Prefer the injected key — it is settings-resolved, so it also sees a
+        # value that lives only in .env. Fall back to the raw environment for
+        # deployments that pass the key as a real environment variable.
+        self._api_key = api_key or os.getenv("GEMINI_API_KEY")
         self._request_timeout_ms = request_timeout_ms
         self._max_retries = max_retries
         self._retry_base_seconds = retry_base_seconds
@@ -110,7 +115,7 @@ class GeminiProvider(LLMProvider):
             from google import genai
             from google.genai import types
 
-            api_key = os.getenv("GEMINI_API_KEY")
+            api_key = self._api_key
             if not api_key:
                 raise RuntimeError("GEMINI_API_KEY is not set; cannot call the LLM.")
             # Client-level timeout applies to every call (generation + embeddings),
