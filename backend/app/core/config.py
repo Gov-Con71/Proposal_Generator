@@ -65,6 +65,13 @@ class Settings(BaseSettings):
     draft_max_concurrency: int = Field(
         default=3, validation_alias="DRAFT_MAX_CONCURRENCY"
     )
+    # HyDE retrieval: embed a short hypothetical past-performance narrative
+    # instead of the raw (imperative/regulatory) requirement text, closing the
+    # register gap against the narrative prose the corpus is actually written
+    # in. Costs one extra LLM call per requirement retrieved, so it's a
+    # separate toggle from the rest of drafting — turn off if that latency/cost
+    # isn't worth the retrieval-quality gain for a given deployment.
+    draft_use_hyde: bool = Field(default=True, validation_alias="DRAFT_USE_HYDE")
 
     # --- S3 / object storage (Story 2.2) ---
     use_localstack: bool = Field(default=True, validation_alias="USE_LOCALSTACK")

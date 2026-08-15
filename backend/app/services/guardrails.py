@@ -95,14 +95,75 @@ _MAX_BANNED_PHRASES = 3
 # 200-char reply to six requirements has not engaged with them.
 _MIN_CHARS_PER_REQUIREMENT = 150
 
+# The section system prompt mandates these as the only allowed structure,
+# telling the model to omit whichever ones its requirements don't support — so
+# a compliant draft carries at least one, never zero. A draft with none of them
+# ignored the structural instruction wholesale and came back as free-flowing
+# prose, which the length/placeholder/filler checks below don't catch at all.
+_REQUIRED_HEADING_PATTERN = re.compile(
+    r"^##\s*(Understanding of the Requirement|Technical Approach|"
+    r"Management Plan|Differentiators)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 
-def validate_draft(content: str, requirement_count: int = 0) -> str:
+# The section system prompt requires every requirement to get an inline
+# `[Req N]` tag somewhere in the section (1-indexed, matching the numbered list
+# the writer was given). This is what turns "the critic judged coverage
+# holistically" into a deterministic, per-requirement, unconditional check that
+# doesn't depend on an LLM call succeeding.
+_REQUIREMENT_TAG_PATTERN = re.compile(r"\[Req (\d+)\]")
+
+# Heuristic shape for the contract numbers this codebase's own past-performance
+# data uses (see COMPANY PROFILE formatting in draft_writer.py): a DoD/GSA-style
+# award number like "W91QUZ-19-C-0042" or "FA8750-20-C-0001" — letters/digits,
+# 2-digit year, single-letter contract type, numeric serial. Not exhaustive of
+# every federal contract-number format, but catches the common shape well
+# enough to flag the highest-consequence hallucination (a fabricated award
+# number) without an LLM call.
+_CONTRACT_NUMBER_PATTERN = re.compile(r"\b[A-Z0-9]{5,}-\d{2}-[A-Z]-\d{4,}\b")
+_DOLLAR_FIGURE_PATTERN = re.compile(r"\$[\d,]+(?:\.\d+)?")
+
+
+def _missing_requirement_tags(text: str, requirement_count: int) -> list[int]:
+    """Requirement numbers (1..requirement_count) with no `[Req N]` tag in `text`."""
+    tagged = {int(n) for n in _REQUIREMENT_TAG_PATTERN.findall(text)}
+    return [i for i in range(1, requirement_count + 1) if i not in tagged]
+
+
+def _unverifiable_facts(text: str, source_context: str) -> list[str]:
+    """Contract numbers / dollar figures asserted in `text` that appear nowhere
+    in `source_context` (the company profile + retrieved evidence the writer
+    was actually given) — the cheapest, highest-consequence hallucination to
+    catch deterministically: a fabricated award number or price figure."""
+    unverifiable = []
+    for pattern in (_CONTRACT_NUMBER_PATTERN, _DOLLAR_FIGURE_PATTERN):
+        for match in pattern.findall(text):
+            if match not in source_context:
+                unverifiable.append(match)
+    return unverifiable
+
+
+def validate_draft(
+    content: str,
+    requirement_count: int = 0,
+    require_headings: bool = False,
+    require_requirement_tags: bool = False,
+    source_context: str | None = None,
+) -> str:
     """Returns a trimmed draft, or raises DraftGuardrailError if unusable.
 
-    Beyond the length floor this rejects the two failure shapes that otherwise
-    reach reviewers as finished text: unfilled placeholders, and prose padded
-    with banned superlatives instead of evidence. `requirement_count` scales the
-    length floor so a token response to a multi-requirement section is caught.
+    Beyond the length floor this rejects the failure shapes that otherwise
+    reach reviewers as finished text: unfilled placeholders, prose padded with
+    banned superlatives instead of evidence, a draft that dropped the mandated
+    section structure entirely (`require_headings`), a requirement with no
+    inline traceability tag (`require_requirement_tags`), and — when
+    `source_context` is supplied — a cited contract number or dollar figure
+    that appears nowhere in what the writer was actually given.
+    `requirement_count` scales the length floor so a token response to a
+    multi-requirement section is caught. The opt-in flags default off because
+    only the section-drafting system prompt (`_SECTION_SYSTEM_PROMPT`) mandates
+    fixed headings and requirement tags; the plain single-requirement writer
+    does not.
     """
     text = (content or "").strip()
     if len(text) < _MIN_DRAFT_CHARS:
@@ -116,6 +177,30 @@ def validate_draft(content: str, requirement_count: int = 0) -> str:
             f"Generated draft is too short ({len(text)} chars) for "
             f"{requirement_count} requirement(s); expected at least {min_chars}."
         )
+
+    if require_headings and not _REQUIRED_HEADING_PATTERN.search(text):
+        raise DraftGuardrailError(
+            "Generated draft has none of the required section headings "
+            "(## Understanding of the Requirement / ## Technical Approach / "
+            "## Management Plan / ## Differentiators) — refusing to save."
+        )
+
+    if require_requirement_tags and requirement_count > 0:
+        missing = _missing_requirement_tags(text, requirement_count)
+        if missing:
+            raise DraftGuardrailError(
+                f"Requirement(s) {missing} have no [Req N] traceability tag "
+                "— refusing to save."
+            )
+
+    if source_context is not None:
+        unverifiable = _unverifiable_facts(text, source_context)
+        if unverifiable:
+            raise DraftGuardrailError(
+                f"Generated draft cites contract number(s)/dollar figure(s) "
+                f"{unverifiable} that appear nowhere in the supplied context "
+                "— refusing to save as a likely hallucination."
+            )
 
     found = [p for p in _PLACEHOLDER_PATTERNS if re.search(p, text, re.IGNORECASE)]
     if found:
