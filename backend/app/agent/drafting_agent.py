@@ -90,7 +90,7 @@ _OUTLINE_SYSTEM_PROMPT = (
 )
 _CRITIC_SYSTEM_PROMPT = (
     "You are a government-contracts compliance reviewer running a red-team pass "
-    "on a proposal section before submission. Judge the draft on four independent "
+    "on a proposal section before submission. Judge the draft on six independent "
     "dimensions:\n"
     "\n"
     "1. addressed — does the draft fully and verifiably answer EVERY numbered "
@@ -106,9 +106,21 @@ _CRITIC_SYSTEM_PROMPT = (
     "4. filler_found — list any content-free corporate phrasing: unsubstantiated "
     "superlatives, boilerplate, or sentences that restate the requirement instead "
     "of answering it.\n"
+    "5. cited_sources — of the RETRIEVED EVIDENCE CHUNKS provided (each labeled "
+    "'[source_name — relevance N]'), list the exact source_name of every one whose "
+    "content is actually reflected in a claim the draft makes. A chunk that was "
+    "supplied but never drawn on does not belong in this list — only report a "
+    "source when the draft is actually leaning on it, not merely from the fact "
+    "that it was retrieved. Empty list if none were used or none were supplied.\n"
+    "6. benefit_mapped — does every substantive capability claim chain a feature/"
+    "method to a stated operational benefit for the government (not left implicit), "
+    "and is that benefit tied to a named evaluation criterion when criteria are "
+    "supplied? A claim that names a feature and cites proof but never says why it "
+    "matters to the government is a feature dump, not a scored argument — this is "
+    "false if even one substantive claim in the draft has this shape.\n"
     "\n"
     "Then write feedback: specific, actionable notes naming exactly what to fix, or "
-    "an empty string when the draft passes on all four. Be strict but fair — do not "
+    "an empty string when the draft passes on all six. Be strict but fair — do not "
     "demand facts the writer was given no source for; the correct fix for those is "
     "a stated assumption, not an invention."
 )
@@ -172,6 +184,13 @@ class ComplianceReview(BaseModel):
     evaluation_alignment: bool = Field(
         description="True only if the draft speaks to the evaluation criteria it is scored under."
     )
+    benefit_mapped: bool = Field(
+        description=(
+            "True only if every substantive claim chains feature -> stated "
+            "government benefit -> proof, with the benefit tied to a named "
+            "evaluation criterion when criteria are supplied."
+        )
+    )
     unsupported_claims: list[str] = Field(
         default_factory=list,
         description="Claims asserted without backing in the supplied profile or context.",
@@ -179,6 +198,10 @@ class ComplianceReview(BaseModel):
     filler_found: list[str] = Field(
         default_factory=list,
         description="Content-free corporate phrasing found in the draft.",
+    )
+    cited_sources: list[str] = Field(
+        default_factory=list,
+        description="source_name of every retrieved evidence chunk actually reflected in a draft claim.",
     )
     feedback: str = Field(
         description="Specific gaps to fix; empty string when the draft passes."
@@ -189,6 +212,7 @@ class ComplianceReview(BaseModel):
         return (
             self.addressed
             and self.evaluation_alignment
+            and self.benefit_mapped
             and not self.unsupported_claims
             and not self.filler_found
         )
@@ -207,7 +231,17 @@ class DraftingState(TypedDict):
     sol_context: Optional[str]       # document-level framing from the solicitation summary
     company_context: Optional[str]   # the offeror's verifiable facts from company_profiles
     attempts: int                    # draft attempts spent on this section
-    feedback: Optional[str]          # critic feedback to fold into the next attempt
+    feedback: Optional[str]          # latest critic feedback (used for review_notes)
+    feedback_history: list[str]      # every round's critic feedback, oldest first —
+                                      # threaded into the next attempt so a revision
+                                      # doesn't blindly re-break what an earlier round fixed
+    cited_sources: Optional[list[str]]  # source_names the last critic review found
+                                         # actually reflected in the draft; None until
+                                         # a critic review has run against the current content
+    prior_findings: Optional[frozenset]  # unsupported_claims|filler_found from the
+                                          # previous round, to detect a non-converging loop
+    stalled: bool                    # True once a revision repeated the prior round's
+                                      # exact findings — stop spending budget on it
     section_id: Optional[str]        # id of the persisted section, set by save_section
 
 
@@ -456,12 +490,15 @@ def _draft_section_node(state: DraftingState) -> DraftingState:
     requirement_texts = section["requirement_texts"] or [section["brief"]]
     grounded = False
     citations: list[dict] = []
+    grounded_requirement_count: Optional[int] = None
+    requirement_count: Optional[int] = None
+    weak_grounding = False
     try:
         result = generate_section_draft(
             uploaded_by=UUID(state["uploaded_by"]),
             section_title=section["title"],
             requirement_texts=requirement_texts,
-            feedback=state.get("feedback"),
+            feedback=_combined_feedback(state.get("feedback_history") or []),
             solicitation_context=state.get("sol_context"),
             company_context=state.get("company_context"),
             evaluation_criteria=section.get("evaluation_criteria"),
@@ -472,6 +509,15 @@ def _draft_section_node(state: DraftingState) -> DraftingState:
         # Quality signal, not core data — default to "not grounded" so a writer
         # that omits it errs toward flagging the section for review.
         grounded = result.get("grounded", False)
+        # Per-requirement coverage and evidence quality, when the writer reports
+        # them (older/stubbed writers may not) — left None/False rather than
+        # guessed, so save_section only adds a note when it actually knows.
+        # `requirement_count` comes from the writer, not `len(requirement_texts)`
+        # here, so it reflects what was actually drafted against (the brief
+        # fallback above can diverge from `section["requirement_texts"]`).
+        grounded_requirement_count = result.get("grounded_requirement_count")
+        requirement_count = result.get("requirement_count")
+        weak_grounding = result.get("weak_grounding", False)
         # Carried to save_section, where they become the section's confidence
         # score and citation chips. A revision replaces them, so what is stored
         # describes the attempt that was actually persisted.
@@ -493,6 +539,9 @@ def _draft_section_node(state: DraftingState) -> DraftingState:
             **section,
             "content": content,
             "grounded": grounded,
+            "grounded_requirement_count": grounded_requirement_count,
+            "requirement_count": requirement_count,
+            "weak_grounding": weak_grounding,
             "citations": citations,
         },
         "attempts": attempts,
@@ -506,16 +555,32 @@ def _call_critic(
     evaluation_criteria: Optional[list[str]] = None,
     solicitation_context: Optional[str] = None,
     company_context: Optional[str] = None,
+    citations: Optional[list[dict]] = None,
 ) -> ComplianceReview:
     """Structured compliance review via the LLM provider. Isolated as a seam.
 
     The critic is given the same frame as the writer: without the company profile
     it cannot tell an unsupported claim from a supported one, and without the
-    evaluation criteria it cannot judge scoring alignment at all.
+    evaluation criteria it cannot judge scoring alignment at all. `citations` are
+    the actual past-performance chunks the writer was handed (source + content) —
+    without them the critic can only judge plausibility against the profile
+    summary, not verify that a claim traces to a specific retrieved source.
     """
     reqs = "\n".join(f"  {i + 1}. {t}" for i, t in enumerate(requirement_texts))
     sol = f"SOLICITATION CONTEXT:\n{solicitation_context}\n\n" if solicitation_context else ""
     company = f"COMPANY PROFILE (the only supportable facts):\n{company_context}\n\n" if company_context else ""
+    evidence = (
+        "RETRIEVED EVIDENCE CHUNKS (the only past-performance sources the writer "
+        "had access to):\n"
+        + "\n\n".join(
+            f"[{c.get('source_name', 'unknown')} — relevance {c.get('score', 0):.2f}]\n"
+            f"{c.get('content', '')}"
+            for c in citations
+        )
+        + "\n\n"
+        if citations
+        else ""
+    )
     criteria = (
         "EVALUATION CRITERIA:\n"
         + "\n".join(f"  - {c}" for c in evaluation_criteria)
@@ -526,14 +591,36 @@ def _call_critic(
     prompt = (
         f"{sol}"
         f"{company}"
+        f"{evidence}"
         f"SECTION: {section_title}\n\n"
         f"REQUIREMENTS:\n{reqs}\n\n"
         f"{criteria}"
         f"DRAFT:\n{draft}\n\n"
-        "Review the draft on all four dimensions."
+        "Review the draft on all four dimensions. For each unsupported claim, say "
+        "whether it fails to match the COMPANY PROFILE, the RETRIEVED EVIDENCE "
+        "CHUNKS, or both — a claim consistent with either is supported."
     )
     return get_llm().generate_structured(
         prompt, ComplianceReview, system=_CRITIC_SYSTEM_PROMPT
+    )
+
+
+def _combined_feedback(history: list[str]) -> Optional[str]:
+    """Folds every prior revision round into one instruction for the next attempt.
+
+    A single prior round is passed through unwrapped — the common case, and the
+    shape earlier callers/tests already expect. Two or more rounds are labeled by
+    attempt, so a revision can see the *whole* trail of what's already been
+    raised, not just the latest verdict: the writer regenerates each section from
+    scratch (no incremental edit), so without this a fix in round 2 can silently
+    reintroduce something round 1's feedback already resolved.
+    """
+    if not history:
+        return None
+    if len(history) == 1:
+        return history[0]
+    return "\n\n".join(
+        f"[Revision {i + 1} feedback]\n{f}" for i, f in enumerate(history)
     )
 
 
@@ -552,6 +639,13 @@ def _review_feedback(review: ComplianceReview) -> str:
         )
     if not review.evaluation_alignment:
         parts.append("Speak directly to the stated evaluation criteria.")
+    if not review.benefit_mapped:
+        parts.append(
+            "At least one claim states a feature/proof but never the "
+            "operational benefit to the government — for every substantive "
+            "claim, state the benefit explicitly and tie it to a named "
+            "evaluation criterion when one applies."
+        )
     return "\n".join(parts)
 
 
@@ -560,9 +654,11 @@ def _check_compliance_node(state: DraftingState) -> DraftingState:
     section = state["section"]
     content = section.get("content")
     # Nothing to review if drafting was guardrail-rejected or the section has no
-    # concrete requirements to check against — proceed straight to save.
+    # concrete requirements to check against — proceed straight to save. No
+    # critic ran against this content, so any earlier round's cited_sources is
+    # now stale and must not be persisted as if it described this content.
     if not content or not section["requirement_texts"]:
-        return {**state, "feedback": None}
+        return {**state, "feedback": None, "cited_sources": None}
 
     try:
         review = _call_critic(
@@ -572,33 +668,78 @@ def _check_compliance_node(state: DraftingState) -> DraftingState:
             evaluation_criteria=section.get("evaluation_criteria"),
             solicitation_context=state.get("sol_context"),
             company_context=state.get("company_context"),
+            citations=section.get("citations"),
         )
     except Exception:
         # A failed critic must neither sink the run nor silently pass the draft:
         # skip revision and let it through as needs_review for a human to verify.
+        # Same staleness reasoning as above: this content was never reviewed.
         logger.exception(
             "drafting: compliance review failed for '%s'; saving unreviewed", section["title"]
         )
-        return {**state, "feedback": None}
-    if review is None or review.passes():
-        return {**state, "feedback": None}
+        return {**state, "feedback": None, "cited_sources": None}
+
+    if review is None:
+        return {**state, "feedback": None, "cited_sources": None}
+
+    # Captured on both the pass and fail paths — a *passing* review still tells
+    # us which evidence the final, saved draft actually leans on.
+    cited_sources = list(review.cited_sources)
+    if review.passes():
+        return {**state, "feedback": None, "cited_sources": cited_sources}
+
     feedback = _review_feedback(review)
-    logger.info(
-        "drafting: section '%s' needs revision (addressed=%s aligned=%s "
-        "unsupported=%d filler=%d) — %.80s",
-        section["title"],
-        review.addressed,
-        review.evaluation_alignment,
-        len(review.unsupported_claims),
-        len(review.filler_found),
-        feedback,
-    )
-    return {**state, "feedback": feedback}
+    # Convergence check: if the exact same unsupported claims/filler survived a
+    # revision unchanged, the writer isn't converging on a fix — each attempt
+    # regenerates the section from scratch, so a repeat here means the model is
+    # circling rather than closing the gap, and the remaining budget is better
+    # spent by a human than by a fourth (or however many) identical attempt.
+    findings = frozenset(review.unsupported_claims) | frozenset(review.filler_found)
+    stalled = bool(findings) and findings == state.get("prior_findings")
+    if stalled:
+        feedback += (
+            "\n\n[Compliance review repeated the same finding(s) after a "
+            "revision attempt — stopping early rather than spending the "
+            "remaining revision budget on a fix that isn't converging.]"
+        )
+        logger.warning(
+            "drafting: section '%s' compliance findings did not change after a "
+            "revision — stopping early instead of exhausting the attempt budget.",
+            section["title"],
+        )
+    else:
+        logger.info(
+            "drafting: section '%s' needs revision (addressed=%s aligned=%s "
+            "unsupported=%d filler=%d) — %.80s",
+            section["title"],
+            review.addressed,
+            review.evaluation_alignment,
+            len(review.unsupported_claims),
+            len(review.filler_found),
+            feedback,
+        )
+    # `feedback` (latest only) is what save_section surfaces as review_notes when
+    # the revision budget runs out — kept singular so a reviewer sees the final
+    # verdict, not the accumulated trail. `feedback_history` is the trail itself,
+    # threaded to the writer via `_combined_feedback` on the next attempt.
+    history = (state.get("feedback_history") or []) + [feedback]
+    return {
+        **state,
+        "feedback": feedback,
+        "feedback_history": history,
+        "cited_sources": cited_sources,
+        "prior_findings": findings,
+        "stalled": stalled,
+    }
 
 
 def _after_check(state: DraftingState) -> str:
     """Conditional edge: revise the section if the critic flagged gaps and budget
-    remains, otherwise save it."""
+    remains, otherwise save it. A stalled loop (the critic's findings didn't
+    change after a revision) saves immediately regardless of remaining budget —
+    another identical attempt isn't going to converge either."""
+    if state.get("stalled"):
+        return "save"
     if state["feedback"] and state["attempts"] < _MAX_ATTEMPTS:
         return "revise"
     return "save"
@@ -620,6 +761,40 @@ def _save_section_node(state: DraftingState) -> DraftingState:
             "Drafted without matching past-performance context — claims are "
             "unevidenced; verify before submission."
         )
+    elif content:
+        # Only reached once fully grounded (the branch above already covers the
+        # zero-evidence case); requirement_count/grounded_requirement_count are
+        # None for a writer that doesn't report them, so this stays silent
+        # rather than guessing at partial coverage.
+        req_count = section.get("requirement_count")
+        grounded_count = section.get("grounded_requirement_count")
+        if grounded_count is not None and req_count and grounded_count < req_count:
+            notes.append(
+                f"Only {grounded_count}/{req_count} requirement(s) in this section "
+                "have supporting past-performance evidence — the rest may rest on "
+                "unevidenced assumptions; verify before submission."
+            )
+        if section.get("weak_grounding"):
+            notes.append(
+                "Some evidence used fell below the standard relevance threshold "
+                "— verify it actually supports the claim before submission."
+            )
+        # Only trusted when the critic explicitly reported a *non-empty* usage
+        # list — an empty list is ambiguous (it means either "the critic found
+        # nothing used" or "this review predates the field"), and there is no
+        # way to tell those apart from the value alone, so an empty list is
+        # treated as no signal rather than as "nothing was used".
+        cited = state.get("cited_sources")
+        if cited:
+            available = set(reference_tags(section.get("citations") or []))
+            unused = available - set(cited)
+            if unused:
+                notes.append(
+                    f"Retrieved evidence from {', '.join(sorted(unused))} was "
+                    "supplied but the compliance review found no claim "
+                    "reflecting it — retrieval may be broader than what the "
+                    "draft actually cites."
+                )
     review_notes = "\n".join(notes) or None
     # The retrieval that produced this draft, recorded rather than discarded:
     # the workspace renders both, and until now got a hardcoded 0.0 and [].
@@ -740,6 +915,10 @@ async def run_drafting(proposal_id: UUID) -> dict:
                 "company_context": company_context,
                 "attempts": 0,
                 "feedback": None,
+                "feedback_history": [],
+                "cited_sources": None,
+                "prior_findings": None,
+                "stalled": False,
                 "section_id": None,
             }
             async with semaphore:

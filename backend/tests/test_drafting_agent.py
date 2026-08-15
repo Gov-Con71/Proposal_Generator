@@ -28,7 +28,7 @@ from app.core.config import settings
 
 
 def _passing_critic(*args, **kwargs):
-    return ComplianceReview(addressed=True, evaluation_alignment=True, feedback="")
+    return ComplianceReview(benefit_mapped=True, addressed=True, evaluation_alignment=True, feedback="")
 
 
 def _planned(title: str, refs: list[int], brief: str, **kwargs) -> PlannedSection:
@@ -186,11 +186,12 @@ def test_critic_drives_one_revision(seeded_rfp, monkeypatch):
     reviews = iter(
         [
             ComplianceReview(
+                benefit_mapped=True,
                 addressed=False,
                 evaluation_alignment=True,
                 feedback="Cite a specific past contract.",
             ),
-            ComplianceReview(addressed=True, evaluation_alignment=True, feedback=""),
+            ComplianceReview(benefit_mapped=True, addressed=True, evaluation_alignment=True, feedback=""),
         ]
     )
     monkeypatch.setattr(drafting_agent, "_call_critic", lambda *a, **kw: next(reviews))
@@ -211,6 +212,224 @@ def test_critic_drives_one_revision(seeded_rfp, monkeypatch):
     assert len(sections) == 1
     assert sections[0]["content"] == "Draft v2."
     assert sections[0]["status"] == "needs_review"
+
+
+def test_revision_feedback_accumulates_across_multiple_rounds(seeded_rfp, monkeypatch):
+    """Each revision must see the *whole* trail of critic feedback, not just the
+    latest round. The writer regenerates each attempt from scratch (no
+    incremental edit), so without the full trail a fix in round 2 can silently
+    reintroduce something round 1's feedback already resolved."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt):
+        return ProposalOutline(sections=[_planned("Technical Approach", [0], "t")])
+
+    reviews = iter(
+        [
+            ComplianceReview(
+                benefit_mapped=True,
+                addressed=False, evaluation_alignment=True,
+                feedback="Cite a specific past contract.",
+            ),
+            ComplianceReview(
+                benefit_mapped=True,
+                addressed=False, evaluation_alignment=True,
+                feedback="Ground the staffing claim in the company profile.",
+            ),
+            ComplianceReview(benefit_mapped=True, addressed=True, evaluation_alignment=True, feedback=""),
+        ]
+    )
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(drafting_agent, "_call_critic", lambda *a, **kw: next(reviews))
+
+    fake_section_draft, draft_calls = _fake_draft("Draft v{n}.")
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    # Three attempts: initial + two critic-driven revisions.
+    assert len(draft_calls) == 3
+    assert draft_calls[0]["feedback"] is None
+    # A single prior round is passed through unwrapped.
+    assert draft_calls[1]["feedback"] == "Cite a specific past contract."
+    # Two+ rounds are labeled and both are present — nothing is dropped.
+    combined = draft_calls[2]["feedback"]
+    assert "Cite a specific past contract." in combined
+    assert "Ground the staffing claim in the company profile." in combined
+    assert combined.index("Cite a specific past contract.") < combined.index(
+        "Ground the staffing claim in the company profile."
+    )
+
+
+def test_critic_receives_the_writer_evidence_chunks(seeded_rfp, monkeypatch):
+    """The critic must see the actual retrieved past-performance text the writer
+    was given, not just the company profile summary — otherwise it can only
+    judge plausibility, not verify a claim traces to a specific source."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt):
+        return ProposalOutline(sections=[_planned("Technical Approach", [0], "t")])
+
+    citations = [
+        {
+            "source_name": "past_bid.pdf",
+            "score": 0.81,
+            "content": "412 depot overhauls under W91QUZ-19-C-0042.",
+        }
+    ]
+
+    def fake_section_draft(uploaded_by, section_title, requirement_texts, **kwargs):
+        return {"content": "Draft.", "grounded": True, "citations": citations}
+
+    critic_calls: list[dict] = []
+
+    def fake_critic(*args, **kwargs):
+        critic_calls.append(kwargs)
+        return _passing_critic()
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(drafting_agent, "_call_critic", fake_critic)
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    assert critic_calls[0]["citations"] == citations
+
+
+def test_unused_evidence_is_flagged_when_the_critic_reports_it(seeded_rfp, monkeypatch):
+    """Retrieval can hand the writer evidence it never actually leans on. When
+    the critic explicitly names which sources the draft *does* reflect, the
+    gap between 'supplied' and 'actually cited' belongs in review_notes — a
+    reviewer needs to know retrieval was broader than what the draft uses."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt):
+        return ProposalOutline(sections=[_planned("Technical Approach", [0], "t")])
+
+    citations = [
+        {"source_name": "cited.pdf", "score": 0.8, "content": "c"},
+        {"source_name": "extra.pdf", "score": 0.6, "content": "c"},
+    ]
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(
+        drafting_agent,
+        "_call_critic",
+        lambda *a, **kw: ComplianceReview(
+            benefit_mapped=True,
+            addressed=True, evaluation_alignment=True, feedback="",
+            cited_sources=["cited.pdf"],
+        ),
+    )
+    monkeypatch.setattr(
+        drafting_agent,
+        "generate_section_draft",
+        lambda **kw: {"content": "Draft.", "grounded": True, "citations": citations},
+    )
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    notes = _fetch_sections(proposal_id)[0]["review_notes"]
+    assert notes and "extra.pdf" in notes
+    assert "cited.pdf" not in notes  # only the unused source is named
+
+
+def test_no_unused_evidence_note_when_the_critic_stays_silent_on_it(seeded_rfp, monkeypatch):
+    """An empty `cited_sources` is ambiguous — it could mean 'nothing was used'
+    or just that this critic response predates the field. Treated as no signal,
+    not as a claim that nothing was used, so no note is added and older/stubbed
+    critics don't produce a spurious warning on every section."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt):
+        return ProposalOutline(sections=[_planned("Technical Approach", [0], "t")])
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)
+    monkeypatch.setattr(
+        drafting_agent,
+        "generate_section_draft",
+        lambda **kw: {
+            "content": "Draft.",
+            "grounded": True,
+            "citations": [{"source_name": "past.pdf", "score": 0.8, "content": "c"}],
+        },
+    )
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    notes = _fetch_sections(proposal_id)[0]["review_notes"]
+    assert notes is None
+
+
+def test_critic_loop_stops_early_when_findings_stop_changing(seeded_rfp, monkeypatch):
+    """If the exact same unsupported-claim/filler finding survives a revision
+    unchanged, the fix isn't converging — the writer regenerates each attempt
+    from scratch, so a repeat means it's circling, not closing the gap. Better
+    to stop and flag it for a human than spend the rest of the budget on
+    identical attempts."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt):
+        return ProposalOutline(sections=[_planned("Technical Approach", [0], "t")])
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(
+        drafting_agent,
+        "_call_critic",
+        lambda *a, **kw: ComplianceReview(
+            benefit_mapped=True,
+            addressed=False,
+            evaluation_alignment=True,
+            unsupported_claims=["ISO 27001 certified"],
+            feedback="Ground this claim.",
+        ),
+    )
+    fake_section_draft, draft_calls = _fake_draft("Draft v{n}.")
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    # Stops after 2 attempts, not the full _MAX_ATTEMPTS=3 budget, because the
+    # same unsupported claim survived the revision unchanged.
+    assert len(draft_calls) == 2
+    sections = _fetch_sections(proposal_id)
+    assert sections[0]["status"] == "needs_review"
+    assert "repeated the same finding" in sections[0]["review_notes"]
+
+
+def test_critic_loop_does_not_stall_on_differing_findings(seeded_rfp, monkeypatch):
+    """A revision that changes *what* the critic flags (not just re-flags the
+    same thing) must still get its full attempt budget — the loop is making
+    progress, it just hasn't finished."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt):
+        return ProposalOutline(sections=[_planned("Technical Approach", [0], "t")])
+
+    reviews = iter(
+        [
+            ComplianceReview(
+                benefit_mapped=True,
+                addressed=False, evaluation_alignment=True,
+                unsupported_claims=["ISO 27001 certified"], feedback="Fix A.",
+            ),
+            ComplianceReview(
+                benefit_mapped=True,
+                addressed=False, evaluation_alignment=True,
+                unsupported_claims=["CMMC Level 2"], feedback="Fix B.",
+            ),
+            ComplianceReview(benefit_mapped=True, addressed=True, evaluation_alignment=True, feedback=""),
+        ]
+    )
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(drafting_agent, "_call_critic", lambda *a, **kw: next(reviews))
+    fake_section_draft, draft_calls = _fake_draft("Draft v{n}.")
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    assert len(draft_calls) == 3  # full budget used — each round made distinct progress
 
 
 def test_draft_failure_is_isolated_to_section(seeded_rfp, monkeypatch):
@@ -258,6 +477,7 @@ def test_exhausted_critic_persists_review_notes(seeded_rfp, monkeypatch):
         drafting_agent,
         "_call_critic",
         lambda *a, **kw: ComplianceReview(
+            benefit_mapped=True,
             addressed=False,
             evaluation_alignment=True,
             feedback="Cite a specific past contract.",
@@ -542,13 +762,14 @@ def test_filler_alone_drives_a_revision(seeded_rfp, monkeypatch):
     reviews = iter(
         [
             ComplianceReview(
+                benefit_mapped=True,
                 addressed=True,          # compliant …
                 evaluation_alignment=True,
                 unsupported_claims=["ISO 27001 certified"],
                 filler_found=["world-class delivery excellence"],
                 feedback="",             # … but unevidenced and padded
             ),
-            ComplianceReview(addressed=True, evaluation_alignment=True, feedback=""),
+            ComplianceReview(benefit_mapped=True, addressed=True, evaluation_alignment=True, feedback=""),
         ]
     )
     monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
@@ -576,8 +797,8 @@ def test_misaligned_evaluation_drives_a_revision(seeded_rfp, monkeypatch):
 
     reviews = iter(
         [
-            ComplianceReview(addressed=True, evaluation_alignment=False, feedback=""),
-            ComplianceReview(addressed=True, evaluation_alignment=True, feedback=""),
+            ComplianceReview(benefit_mapped=True, addressed=True, evaluation_alignment=False, feedback=""),
+            ComplianceReview(benefit_mapped=True, addressed=True, evaluation_alignment=True, feedback=""),
         ]
     )
     monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
@@ -589,6 +810,37 @@ def test_misaligned_evaluation_drives_a_revision(seeded_rfp, monkeypatch):
 
     assert len(draft_calls) == 2
     assert "evaluation criteria" in draft_calls[1]["feedback"]
+
+
+def test_unmapped_benefit_drives_a_revision(seeded_rfp, monkeypatch):
+    """A draft can be compliant, evidenced, and on-topic and still just list
+    features without ever saying why they matter to the government — that's a
+    feature dump, not a scored argument, and must be sent back on its own,
+    independent of every other dimension passing."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt):
+        return ProposalOutline(sections=[_planned("Technical Approach", [0], "t")])
+
+    reviews = iter(
+        [
+            ComplianceReview(
+                benefit_mapped=False, addressed=True, evaluation_alignment=True, feedback="",
+            ),
+            ComplianceReview(
+                benefit_mapped=True, addressed=True, evaluation_alignment=True, feedback="",
+            ),
+        ]
+    )
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(drafting_agent, "_call_critic", lambda *a, **kw: next(reviews))
+    fake_section_draft, draft_calls = _fake_draft("Draft v{n}.")
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    assert len(draft_calls) == 2
+    assert "operational benefit" in draft_calls[1]["feedback"]
 
 
 def test_ungrounded_section_is_flagged_for_review(seeded_rfp, monkeypatch):
@@ -609,6 +861,66 @@ def test_ungrounded_section_is_flagged_for_review(seeded_rfp, monkeypatch):
 
     notes = _fetch_sections(proposal_id)[0]["review_notes"]
     assert notes and "past-performance" in notes
+
+
+def test_partially_grounded_section_is_flagged_for_review(seeded_rfp, monkeypatch):
+    """A section can have *some* evidence and still be mostly unevidenced — 2 of
+    5 requirements backed reads very differently from 5 of 5, and the reviewer
+    must see which one this was, not just a blanket 'grounded' flag."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt):
+        return ProposalOutline(sections=[_planned("Technical Approach", [0], "t")])
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)
+    monkeypatch.setattr(
+        drafting_agent,
+        "generate_section_draft",
+        lambda **kw: {
+            "content": "Drafted body.",
+            "grounded": True,
+            "grounded_requirement_count": 2,
+            "requirement_count": 5,
+            "weak_grounding": False,
+            "citations": [{"source_name": "past.pdf", "score": 0.7, "content": "c"}],
+        },
+    )
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    notes = _fetch_sections(proposal_id)[0]["review_notes"]
+    assert notes and "2/5 requirement" in notes
+
+
+def test_weakly_grounded_section_is_flagged_for_review(seeded_rfp, monkeypatch):
+    """Evidence that only cleared the relaxed fallback floor is weaker than a
+    clean match — the reviewer needs to know to double-check it, not see the
+    same confident 'grounded' signal as a section backed by a strong match."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt):
+        return ProposalOutline(sections=[_planned("Technical Approach", [0], "t")])
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)
+    monkeypatch.setattr(
+        drafting_agent,
+        "generate_section_draft",
+        lambda **kw: {
+            "content": "Drafted body.",
+            "grounded": True,
+            "grounded_requirement_count": 1,
+            "requirement_count": 1,
+            "weak_grounding": True,
+            "citations": [{"source_name": "past.pdf", "score": 0.25, "content": "c"}],
+        },
+    )
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    notes = _fetch_sections(proposal_id)[0]["review_notes"]
+    assert notes and "relevance threshold" in notes
 
 
 # ---------------------------------------------------------------------------

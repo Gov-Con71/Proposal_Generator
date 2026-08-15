@@ -62,6 +62,21 @@ _SECTION_SYSTEM_PROMPT = (
     "the supplied context does not support a claim, either drop the claim or state "
     "the assumption explicitly in one clause.\n"
     "\n"
+    "CLAIM STRUCTURE — every substantive claim must chain three parts together, "
+    "in one place, not scattered: (1) the FEATURE/METHOD the offeror will use, "
+    "(2) the OPERATIONAL BENEFIT to the government that follows from it — "
+    "explicitly tied to a named evaluation criterion when EVALUATION CRITERIA is "
+    "supplied, not left implicit, (3) PROOF — the specific contract, metric, or "
+    "certification from COMPANY PROFILE/PAST-PERFORMANCE CONTEXT that makes (1) "
+    "credible. A claim with (1) and (3) but no stated (2) is a feature dump, not "
+    "an evaluator-scored argument — do not submit it in that form.\n"
+    "\n"
+    "TRACEABILITY — end the paragraph or bullet that answers a numbered "
+    "requirement with an inline tag citing it, e.g. '[Req 3]'. A requirement "
+    "answered across multiple paragraphs may be tagged more than once; every tag "
+    "must reference a requirement number actually listed below, and every "
+    "requirement listed below must get at least one tag somewhere in the section.\n"
+    "\n"
     "TONE — active voice, authoritative, objective, specific. Write what the "
     "offeror will do and how it will be verified.\n"
     "\n"
@@ -75,6 +90,15 @@ _SECTION_SYSTEM_PROMPT = (
     "Output the section body only — no preamble, no closing summary of what you "
     "just wrote."
 )
+
+
+# A tenant with a long past-performance history would otherwise have every
+# entry dumped into every section's prompt verbatim — redundant with the
+# section-specific evidence separately retrieved into PAST-PERFORMANCE CONTEXT,
+# and it inflates token spend without adding signal. Capped to the strongest
+# entries by contract value, a reasonable proxy for evidentiary weight absent a
+# per-entry embedding to rank by relevance to the section actually being drafted.
+_MAX_PAST_PERFORMANCE_ENTRIES = 8
 
 
 def _format_company_profile(profile) -> str | None:
@@ -104,13 +128,35 @@ def _format_company_profile(profile) -> str | None:
     lines = [f"- {label}: {value}" for label, value in fields if value]
 
     if profile.past_performance:
-        lines.append("- Past performance:")
+        entries = sorted(
+            profile.past_performance, key=lambda pp: pp.value or 0, reverse=True
+        )
+        shown = entries[:_MAX_PAST_PERFORMANCE_ENTRIES]
+        omitted = len(entries) - len(shown)
+        label = f"Past performance (top {len(shown)} by value)" if omitted else "Past performance"
+        lines.append(f"- {label}:")
         lines.extend(
             f"    * {pp.contract_number} — {pp.agency}, ${pp.value:,.0f}, "
             f"{pp.period}: {pp.scope}"
-            for pp in profile.past_performance
+            for pp in shown
         )
     return "\n".join(lines) if lines else None
+
+
+# A single retrieved chunk or solicitation summary is tenant-uploaded prose of
+# unbounded length; capping each keeps one oversized block from crowding the
+# REQUIREMENTS/feedback placed after it out of the model's attention budget.
+# Not enforced on the *assembled* prompt itself — truncating that risks cutting
+# off the trailing "write it now" cue — so an oversized result is only logged.
+_MAX_CHUNK_CHARS = 1500
+_MAX_SOLICITATION_CHARS = 4000
+_PROMPT_SOFT_CEILING_CHARS = 24_000
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + " …[truncated]"
 
 
 def _assemble_section_prompt(
@@ -127,14 +173,19 @@ def _assemble_section_prompt(
     reqs = "\n".join(f"  {i + 1}. {t}" for i, t in enumerate(requirement_texts))
     if context:
         blocks = "\n\n".join(
-            f"[{c['source_name']} — relevance {c['score']:.2f}]\n{c['content']}"
+            f"[{c['source_name']} — relevance {c['score']:.2f}]\n"
+            f"{_truncate(c['content'], _MAX_CHUNK_CHARS)}"
             for c in context
         )
     else:
         blocks = "(no matching past-performance context found)"
     # Document-level framing from the solicitation summary (agency, objective, …),
     # so the section reads as a response to this specific opportunity.
-    sol = f"SOLICITATION CONTEXT:\n{solicitation_context}\n\n" if solicitation_context else ""
+    sol = (
+        f"SOLICITATION CONTEXT:\n{_truncate(solicitation_context, _MAX_SOLICITATION_CHARS)}\n\n"
+        if solicitation_context
+        else ""
+    )
     # The offeror's own verifiable facts — the source of every evidence-backed claim.
     company = f"COMPANY PROFILE:\n{company_context}\n\n" if company_context else ""
     # Section M: what this section is actually scored on.
@@ -153,35 +204,186 @@ def _assemble_section_prompt(
         else ""
     )
     budget = (
-        f"\n\nTarget length: approximately {target_words} words."
+        f"\nTarget length: approximately {target_words} words."
         if target_words
         else ""
     )
     # On a revision, fold the compliance critic's feedback into the instruction.
     revision = (
-        f"\n\nA prior draft was reviewed and found lacking. Address this feedback "
+        f"\nA prior draft was reviewed and found lacking. Address this feedback "
         f"specifically:\n{feedback}\n"
         if feedback
         else ""
     )
-    return (
+    # Background/evidence blocks (solicitation, profile, retrieved context, win
+    # themes) come first — they're static per section and cheap to attend to
+    # early. EVALUATION CRITERIA (Section M) is placed immediately adjacent to
+    # REQUIREMENTS rather than in the background cluster: they're the same kind
+    # of constraint — what this section must satisfy and what it's scored
+    # against — and separating them with a WIN THEMES block would make the model
+    # read the scoring rubric and the text it must satisfy as unrelated. The word
+    # budget and any revision feedback stay last, immediately before the
+    # generation cue: these are the constraints the draft is actually scored
+    # against, and LLM attention favors content nearest the instruction that
+    # triggers generation ("lost in the middle" effect) — none of this should be
+    # competing for attention from the prompt's cold middle.
+    prompt = (
         f"{sol}"
         f"{company}"
-        f"PROPOSAL SECTION: {section_title}\n\n"
-        f"REQUIREMENTS THIS SECTION MUST SATISFY:\n{reqs}\n\n"
-        f"{evaluation}"
+        f"PAST-PERFORMANCE CONTEXT:\n{blocks}\n\n"
         f"{themes}"
-        f"PAST-PERFORMANCE CONTEXT:\n{blocks}"
+        f"PROPOSAL SECTION: {section_title}\n\n"
+        f"{evaluation}"
+        f"REQUIREMENTS THIS SECTION MUST SATISFY:\n{reqs}\n"
         f"{budget}"
         f"{revision}\n\n"
         "Write the section draft now."
     )
+    if len(prompt) > _PROMPT_SOFT_CEILING_CHARS:
+        logger.warning(
+            "_assemble_section_prompt: '%s' prompt is %d chars, over the %d soft "
+            "ceiling — company profile, retrieved context, or solicitation "
+            "summary may be crowding out the requirements.",
+            section_title,
+            len(prompt),
+            _PROMPT_SOFT_CEILING_CHARS,
+        )
+    return prompt
 
 
 # Retrieved chunks below this cosine similarity are noise rather than evidence.
 # The system prompt tells the model to ground every claim in what it is given, so
 # handing it weak matches actively produces off-topic or hedged prose.
 _MIN_CONTEXT_SCORE = 0.35
+
+# Tried only when a requirement clears nothing at the standard floor. Some
+# evidence — even a stylistically-distant match — lets the model write a
+# defensible, if hedged, response instead of an admittedly-generic one; the
+# caller is told the grounding is weak (`weak_grounding`) so it isn't presented
+# with the same confidence as a clean match.
+_FALLBACK_CONTEXT_SCORE = 0.20
+
+# No single retrieved document may fill more than this many of the final
+# context slots. A rough, source-level stand-in for MMR: true diversity
+# re-ranking needs the underlying embedding vectors to measure pairwise
+# similarity, which the retrieval layer doesn't expose past a scalar score —
+# this instead caps by source_name, which is what the audit's actual concern
+# was (5 "matches" turning out to be 5 adjacent chunks of one past proposal).
+_MAX_CHUNKS_PER_SOURCE = 2
+
+_HYDE_SYSTEM_PROMPT = (
+    "You write a single short, plausible excerpt from a government contractor's "
+    "past-performance narrative — the kind of prose that appears in a proposal's "
+    "prior-contract write-up — that would satisfy the requirement below if it "
+    "were true of the offeror's history. 2-3 sentences, concrete and specific "
+    "(as if naming a real contract, metric, or outcome). Do not hedge, caveat, "
+    "or address the reader; write only the narrative prose itself, as though "
+    "quoting a real past-performance summary."
+)
+
+
+def _hyde_document(section_title: str, requirement_text: str) -> str | None:
+    """A short hypothetical past-performance narrative answering `requirement_text`.
+
+    HyDE (Hypothetical Document Embeddings): the retrieval corpus is narrative
+    prose ("delivered 412 depot overhauls under W91QUZ-19-C-0042"); the query is
+    imperative/regulatory ("The contractor SHALL..."). Embedding the raw
+    requirement against that corpus is a register mismatch that can silently
+    drop genuinely relevant chunks phrased differently — embedding a
+    *hypothetical* narrative answer instead closes that gap. Returns None (the
+    caller falls back to the raw-text query) on any generation failure:
+    retrieval must never be blocked by this being an extra LLM call.
+    """
+    try:
+        return get_llm().generate_text(
+            f"SECTION: {section_title}\nREQUIREMENT: {requirement_text}",
+            system=_HYDE_SYSTEM_PROMPT,
+        )
+    except Exception:
+        logger.warning(
+            "_hyde_document: generation failed for '%s' — falling back to the "
+            "raw requirement text as the retrieval query.",
+            section_title,
+            exc_info=True,
+        )
+        return None
+
+
+def _diversify(hits: list[dict], top_k: int) -> list[dict]:
+    """Picks the top `top_k` hits, capping how many come from one source.
+
+    Greedy by score: a hit is skipped past `_MAX_CHUNKS_PER_SOURCE` for its
+    source and parked in `overflow`; if the diversity cap leaves fewer than
+    `top_k` selected (the tenant's whole corpus is thin, or one source
+    genuinely dominates), the highest-scoring overflow hits backfill the rest
+    rather than under-filling the context.
+    """
+    ranked = sorted(hits, key=lambda h: -h["score"])
+    selected: list[dict] = []
+    counts: dict[str, int] = {}
+    overflow: list[dict] = []
+    for h in ranked:
+        source = h.get("source_name")
+        if counts.get(source, 0) < _MAX_CHUNKS_PER_SOURCE:
+            selected.append(h)
+            counts[source] = counts.get(source, 0) + 1
+        else:
+            overflow.append(h)
+        if len(selected) >= top_k:
+            break
+    if len(selected) < top_k:
+        selected.extend(overflow[: top_k - len(selected)])
+    return selected
+
+
+def _retrieve_section_context(
+    uploaded_by: UUID,
+    section_title: str,
+    requirement_texts: list[str],
+    top_k: int,
+    use_hyde: bool = True,
+) -> tuple[list[dict], int, bool]:
+    """Retrieves grounding context per requirement instead of one pooled query.
+
+    A single query embedding built from the whole section (title + every
+    requirement concatenated) centroids toward whichever requirement is longest
+    or most semantically dominant — a section bundling several requirements can
+    end up retrieving evidence for only one of them while the rest get none,
+    even though the section-level `grounded` flag still reads True. Querying
+    per requirement and unioning the (deduped, diversified) results gives every
+    requirement its own shot at evidence, from more than one source.
+
+    Returns `(context, grounded_requirement_count, weak_grounding)`: the top-
+    `top_k` context blocks across all requirements; how many distinct
+    requirements found *any* evidence; and whether any of it only cleared the
+    relaxed fallback floor rather than the standard one.
+    """
+    # Split the shared top_k budget across requirements (at least 2 each), so a
+    # 4-requirement section doesn't get crowded out by one requirement's chunks.
+    per_req_k = max(2, -(-top_k // max(1, len(requirement_texts))))
+    seen: dict[str, dict] = {}
+    grounded_count = 0
+    weak = False
+    for req in requirement_texts:
+        hyde = _hyde_document(section_title, req) if use_hyde else None
+        query = hyde or f"{section_title}\n{req}"
+        hits = search_similar(
+            uploaded_by, query, top_k=per_req_k, min_score=_MIN_CONTEXT_SCORE
+        )
+        if not hits:
+            hits = search_similar(
+                uploaded_by, query, top_k=per_req_k, min_score=_FALLBACK_CONTEXT_SCORE
+            )
+            if hits:
+                weak = True
+        if hits:
+            grounded_count += 1
+        for h in hits:
+            existing = seen.get(h["chunk_id"])
+            if existing is None or h["score"] > existing["score"]:
+                seen[h["chunk_id"]] = h
+    context = _diversify(list(seen.values()), top_k)
+    return context, grounded_count, weak
 
 
 def grounding_confidence(citations: list[dict]) -> float:
@@ -241,10 +443,19 @@ def generate_section_draft(
     (the Section M factors this section is scored on), `win_themes`, and
     `target_words` (derived from any stated page limit).
     """
-    # Retrieve against the section's combined intent (title + its requirements).
-    query = section_title + "\n" + "\n".join(requirement_texts)
-    context = search_similar(
-        uploaded_by, query, top_k=top_k, min_score=_MIN_CONTEXT_SCORE
+    # Retrieve per requirement (not one pooled query) so a multi-requirement
+    # section can't have its evidence dominated by whichever requirement is
+    # longest — see `_retrieve_section_context`. Imported lazily (matching the
+    # rest of the codebase's settings-access convention) so this module stays
+    # import-order-safe with app.core.config.
+    from app.core.config import settings
+
+    context, grounded_requirement_count, weak_grounding = _retrieve_section_context(
+        uploaded_by,
+        section_title,
+        requirement_texts,
+        top_k,
+        use_hyde=settings.draft_use_hyde,
     )
     if not context:
         # Clear signal: with no past-performance the draft is ungrounded (generic).
@@ -252,6 +463,14 @@ def generate_section_draft(
             "generate_section_draft: '%s' has no past-performance context above "
             "the relevance floor — draft will be ungrounded.",
             section_title,
+        )
+    elif grounded_requirement_count < len(requirement_texts):
+        logger.warning(
+            "generate_section_draft: '%s' — only %d/%d requirement(s) matched "
+            "past-performance context; the rest will be unevidenced.",
+            section_title,
+            grounded_requirement_count,
+            len(requirement_texts),
         )
     prompt = _assemble_section_prompt(
         section_title,
@@ -266,7 +485,23 @@ def generate_section_draft(
     )
 
     text = get_llm().generate_text(prompt, system=_SECTION_SYSTEM_PROMPT)
-    draft = validate_draft(text, requirement_count=len(requirement_texts))
+    # Everything the writer actually had to work with, for the deterministic
+    # fact-check below — a cited contract number/dollar figure not found
+    # anywhere in here was not something the writer was given.
+    source_context = "\n".join(
+        filter(
+            None,
+            [solicitation_context, company_context]
+            + [c["content"] for c in context],
+        )
+    )
+    draft = validate_draft(
+        text,
+        requirement_count=len(requirement_texts),
+        require_headings=True,
+        require_requirement_tags=True,
+        source_context=source_context,
+    )
     logger.info(
         "generate_section_draft: '%s' — %d chars from %d context block(s)",
         section_title,
@@ -276,8 +511,17 @@ def generate_section_draft(
     return {
         "content": draft,
         "grounded": bool(context),
+        # Per-requirement coverage: `grounded` alone is section-wide and reads
+        # True as soon as *any* requirement found evidence, which understates a
+        # section where only 1 of 4 requirements is actually backed.
+        "grounded_requirement_count": grounded_requirement_count,
+        "requirement_count": len(requirement_texts),
+        "weak_grounding": weak_grounding,
+        # `content` rides along so the compliance critic can check claims
+        # against the actual evidence text the writer saw, not just its score.
         "citations": [
-            {"source_name": c["source_name"], "score": c["score"]} for c in context
+            {"source_name": c["source_name"], "score": c["score"], "content": c["content"]}
+            for c in context
         ],
     }
 
