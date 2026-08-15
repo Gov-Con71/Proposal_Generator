@@ -79,45 +79,71 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     ref
   ) => {
     const isDisabled = disabled || loading
-    const Comp = asChild ? Slot : 'button'
+
+    const classes = cn(
+      // Base
+      'inline-flex items-center justify-center',
+      'border font-medium',
+      'transition-all duration-100',
+      'select-none whitespace-nowrap',
+      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-600 focus-visible:ring-offset-1',
+      'disabled:cursor-not-allowed',
+      // Variant
+      variantStyles[variant],
+      // Size
+      sizeStyles[size],
+      className
+    )
+
+    // Spinner, or icons either side of the label.
+    const decorate = (label: React.ReactNode) =>
+      loading ? (
+        <>
+          <LoadingSpinner size={size} />
+          {label && <span>{label}</span>}
+        </>
+      ) : (
+        <>
+          {icon && iconPosition === 'left' && (
+            <span className="shrink-0">{icon}</span>
+          )}
+          {label}
+          {icon && iconPosition === 'right' && (
+            <span className="shrink-0">{icon}</span>
+          )}
+        </>
+      )
+
+    if (asChild) {
+      // Slot merges its props onto the single element it is handed. Wrapping the
+      // content in a fragment made *the fragment* that element, so React dropped
+      // className/disabled with "Invalid prop `disabled` supplied to
+      // React.Fragment" — and, less visibly, every `asChild` button rendered as
+      // an unstyled link. So the decoration has to go inside the caller's
+      // element rather than beside it.
+      const child = React.Children.only(children) as React.ReactElement<{
+        children?: React.ReactNode
+      }>
+
+      return (
+        <Slot
+          ref={ref}
+          className={classes}
+          // `disabled` is a <button> attribute; on a slotted <a>/<Link> it is
+          // invalid and does nothing. Express the state accessibly instead —
+          // omitted entirely when false so it never renders aria-disabled="false".
+          aria-disabled={isDisabled || undefined}
+          {...props}
+        >
+          {React.cloneElement(child, undefined, decorate(child.props.children))}
+        </Slot>
+      )
+    }
 
     return (
-      <Comp
-        ref={ref}
-        disabled={isDisabled}
-        className={cn(
-          // Base
-          'inline-flex items-center justify-center',
-          'border font-medium',
-          'transition-all duration-100',
-          'select-none whitespace-nowrap',
-          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-600 focus-visible:ring-offset-1',
-          'disabled:cursor-not-allowed',
-          // Variant
-          variantStyles[variant],
-          // Size
-          sizeStyles[size],
-          className
-        )}
-        {...props}
-      >
-        {loading ? (
-          <>
-            <LoadingSpinner size={size} />
-            {children && <span>{children}</span>}
-          </>
-        ) : (
-          <>
-            {icon && iconPosition === 'left' && (
-              <span className="shrink-0">{icon}</span>
-            )}
-            {children}
-            {icon && iconPosition === 'right' && (
-              <span className="shrink-0">{icon}</span>
-            )}
-          </>
-        )}
-      </Comp>
+      <button ref={ref} disabled={isDisabled} className={classes} {...props}>
+        {decorate(children)}
+      </button>
     )
   }
 )
