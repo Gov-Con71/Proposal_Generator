@@ -308,7 +308,7 @@ def test_retrieve_section_context_queries_each_requirement_separately(monkeypatc
 
     queries_seen: list[str] = []
 
-    def fake_search(uploaded_by, query, top_k, min_score):
+    def fake_search(uploaded_by, query, top_k, min_score, **kwargs):
         queries_seen.append(query)
         if "staffing" in query:
             return [{"chunk_id": "staff-1", "source_name": "s.pdf", "content": "c", "score": 0.9}]
@@ -339,7 +339,7 @@ def test_retrieve_section_context_dedupes_across_requirements(monkeypatch):
     """Two requirements matching the same chunk must not double-count it."""
     import app.services.draft_writer as _dw
 
-    def fake_search(uploaded_by, query, top_k, min_score):
+    def fake_search(uploaded_by, query, top_k, min_score, **kwargs):
         return [{"chunk_id": "shared", "source_name": "s.pdf", "content": "c", "score": 0.7}]
 
     monkeypatch.setattr(_dw, "search_similar", fake_search)
@@ -361,7 +361,7 @@ def test_retrieve_section_context_falls_back_to_a_relaxed_floor(monkeypatch):
     a relaxed floor rather than being left with zero evidence outright."""
     import app.services.draft_writer as _dw
 
-    def fake_search(uploaded_by, query, top_k, min_score):
+    def fake_search(uploaded_by, query, top_k, min_score, **kwargs):
         if min_score == _dw._MIN_CONTEXT_SCORE:
             return []
         assert min_score == _dw._FALLBACK_CONTEXT_SCORE
@@ -387,7 +387,7 @@ def test_retrieve_section_context_reports_partial_coverage(monkeypatch):
     must reflect that rather than reporting the section as fully grounded."""
     import app.services.draft_writer as _dw
 
-    def fake_search(uploaded_by, query, top_k, min_score):
+    def fake_search(uploaded_by, query, top_k, min_score, **kwargs):
         if "findable" in query:
             return [{"chunk_id": "hit", "source_name": "s.pdf", "content": "c", "score": 0.8}]
         return []
@@ -423,7 +423,7 @@ def test_retrieve_section_context_uses_the_hyde_document_as_the_query(monkeypatc
 
     queries_seen: list[str] = []
 
-    def fake_search(uploaded_by, query, top_k, min_score):
+    def fake_search(uploaded_by, query, top_k, min_score, **kwargs):
         queries_seen.append(query)
         return [{"chunk_id": "c1", "source_name": "s.pdf", "content": "c", "score": 0.8}]
 
@@ -490,7 +490,7 @@ def test_retrieve_section_context_falls_back_to_raw_text_when_hyde_fails(monkeyp
 
     queries_seen: list[str] = []
 
-    def fake_search(uploaded_by, query, top_k, min_score):
+    def fake_search(uploaded_by, query, top_k, min_score, **kwargs):
         queries_seen.append(query)
         return []
 
