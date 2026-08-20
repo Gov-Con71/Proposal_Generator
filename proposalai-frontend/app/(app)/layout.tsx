@@ -22,6 +22,12 @@ const NAV = [
     ],
   },
   {
+    label: 'EVIDENCE',
+    items: [
+      { href: '/library', label: 'Past Performance', icon: History },
+    ],
+  },
+  {
     label: 'ACCOUNT',
     items: [
       { href: '/profile',  label: 'Profile',  icon: Building2 },
@@ -43,6 +49,29 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter()
   const clearSession = useAuthStore((s) => s.clearSession)
   const user = useAuthStore((s) => s.user)
+
+  // The proposal currently open, if any: /proposals/{id}/… where id is a real
+  // id and not the "new" flow. Drives the contextual Workspace/Compliance links.
+  const openProposalId = (() => {
+    const m = pathname.match(/^\/proposals\/([^/]+)/)
+    const id = m?.[1]
+    return id && id !== 'new' ? id : null
+  })()
+
+  const topNav = [
+    { href: '/dashboard', label: 'Dashboard' },
+    { href: '/library', label: 'Past Performance' },
+    ...(openProposalId
+      ? [
+          { href: `/proposals/${openProposalId}/workspace`, label: 'Workspace' },
+          { href: `/proposals/${openProposalId}/compliance`, label: 'Compliance' },
+        ]
+      : []),
+  ]
+
+  // Exact match, or a real path segment beneath it — a plain startsWith lit
+  // "/proposals" for "/proposals-archive" and lit every nested route at once.
+  const isActive = (href: string) => pathname === href || pathname.startsWith(href + '/')
 
   async function handleLogout() {
     // Revoke server-side first so the refresh token can't be rotated again;
@@ -70,19 +99,21 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           <span className="text-sm font-medium">ProposalAI</span>
         </Link>
 
-        {/* Center nav links */}
+        {/* Center nav links.
+            Workspace and Compliance are per-proposal routes — they only exist
+            under /proposals/{id}. They used to sit here as fixed hrefs, so
+            "Workspace" pointed at /proposals/workspace, which the router read
+            as a proposal whose id is the literal string "workspace", and
+            "Compliance" just went to the proposals list. Both are now built
+            from the proposal currently open, and hidden when none is. */}
         <nav className="flex items-center gap-0.5 ml-4">
-          {[
-            { href: '/dashboard',   label: 'Dashboard' },
-            { href: '/proposals/workspace', label: 'Workspace' },
-            { href: '/proposals',   label: 'Compliance' },
-          ].map((link) => (
+          {topNav.map((link) => (
             <Link
               key={link.href}
               href={link.href}
               className={cn(
                 'px-3 py-1 rounded text-xs transition-colors',
-                pathname.startsWith(link.href)
+                isActive(link.href)
                   ? 'text-[var(--text-primary)] font-medium bg-[var(--bg-secondary)]'
                   : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]'
               )}
@@ -96,8 +127,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           <button className="w-7 h-7 flex items-center justify-center rounded hover:bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors">
             <Bell className="w-4 h-4" />
           </button>
-          <Button variant="primary" size="sm" icon={<Plus className="w-3.5 h-3.5" />}>
-            <Link href="/proposals/new" className="no-underline">New proposal</Link>
+          {/* asChild, not a Link nested inside the button: a <a> inside a
+              <button> is invalid HTML and browsers refuse to navigate it. */}
+          <Button variant="primary" size="sm" icon={<Plus className="w-3.5 h-3.5" />} asChild>
+            <Link href="/proposals/new">New proposal</Link>
           </Button>
           <div
             title={user?.email}

@@ -46,6 +46,9 @@ def _build_provider(tier: Tier) -> LLMProvider:
             model=model,
             embed_model=settings.embedding_model,
             embed_dim=_EMBEDDING_DIM,
+            # Injected from settings so the key resolves from .env too, not just
+            # from real environment variables.
+            api_key=settings.gemini_api_key,
             request_timeout_ms=settings.llm_request_timeout_seconds * 1000,
             max_retries=settings.llm_max_retries,
             retry_base_seconds=settings.llm_retry_base_seconds,
@@ -57,6 +60,7 @@ def _build_provider(tier: Tier) -> LLMProvider:
             model=model,
             embed_model=settings.embedding_model,
             embed_dim=_EMBEDDING_DIM,
+            api_key=settings.featherless_api_key,
             request_timeout_ms=settings.llm_request_timeout_seconds * 1000,
             max_retries=settings.llm_max_retries,
             retry_base_seconds=settings.llm_retry_base_seconds,

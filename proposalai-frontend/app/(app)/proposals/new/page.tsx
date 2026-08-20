@@ -8,19 +8,13 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 // Remove: import { Select } from '@/components/ui/input'
 import { Card, StepIndicator } from '@/components/ui/card'
+import { PROPOSAL_STEPS } from '@/lib/constants/steps'
 import { cn } from '@/lib/utils/cn'
 import { formatFileSize } from '@/lib/utils/format'
 import { documentsApi } from '@/lib/api'
-import type { Step } from '@/components/ui/card'
 
 const MAX_SIZE = 50 * 1024 * 1024
 
-const STEPS: Step[] = [
-  { label: 'Upload RFP', status: 'active' },
-  { label: 'Analyze',    status: 'pending' },
-  { label: 'Outline',    status: 'pending' },
-  { label: 'Review',     status: 'pending' },
-]
 
 const CONTRACT_TYPES = [
   { value: 'ffp',  label: 'Firm Fixed Price (FFP)' },
@@ -102,7 +96,10 @@ export default function UploadPage() {
         return
       }
       // Navigate by proposal id — the whole /proposals/… namespace is keyed on it.
-      router.push(`/proposals/new/process?proposal=${res.proposalId}`)
+      // Ingestion is already running on the worker; the supporting-documents
+      // step sits in front of it rather than blocking it, so anything attached
+      // there is indexed and ready by the time drafting needs it.
+      router.push(`/proposals/new/evidence?proposal=${res.proposalId}`)
     } catch (e) {
       const err = e as { response?: { status?: number; data?: { detail?: string } } }
       const detail = err.response?.data?.detail
@@ -124,7 +121,7 @@ export default function UploadPage() {
         <ArrowLeft className="w-3.5 h-3.5" /> Back to dashboard
       </Link>
 
-      <StepIndicator steps={STEPS} className="mb-6" />
+      <StepIndicator steps={PROPOSAL_STEPS('upload')} className="mb-6" />
 
       {/* Upload zone */}
       <Card className="mb-4">
@@ -239,7 +236,7 @@ export default function UploadPage() {
           disabled={uploading}
           onClick={handleContinue}
         >
-          {uploading ? 'Uploading…' : 'Continue to Analysis'}
+          {uploading ? 'Uploading…' : 'Next'}
         </Button>
       </div>
     </div>

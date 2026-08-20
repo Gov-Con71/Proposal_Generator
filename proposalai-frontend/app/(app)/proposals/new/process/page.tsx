@@ -4,18 +4,12 @@ import { useRouter } from 'next/navigation'
 import { CheckCircle2, Loader2, Circle, XCircle, ArrowRight, Clock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, StepIndicator } from '@/components/ui/card'
+import { PROPOSAL_STEPS } from '@/lib/constants/steps'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { useProcessing } from '@/lib/hooks'
 import { cn } from '@/lib/utils/cn'
 import type { PipelineStep } from '@/types'
-import type { Step } from '@/components/ui/card'
 
-const STEPS: Step[] = [
-  { label: 'Upload RFP', status: 'done' },
-  { label: 'Analyze',    status: 'done' },
-  { label: 'Process',    status: 'active' },
-  { label: 'Review',     status: 'pending' },
-]
 
 export default function ProcessPage({ searchParams }: { searchParams: Promise<{ proposal?: string }> }) {
   const router = useRouter()
@@ -57,6 +51,30 @@ export default function ProcessPage({ searchParams }: { searchParams: Promise<{ 
     )
   }
 
+  // A failed run is a real, explained outcome — render it before the connection
+  // branch. The stream closes right after the failure frame, so the close that
+  // follows must not be allowed to overwrite this with "lost connection".
+  if (pipeline.status === 'failed') {
+    return (
+      <div className="min-h-[calc(100vh-44px)] bg-[var(--bg-secondary)] flex items-center justify-center px-4">
+        <Card className="w-full max-w-lg">
+          <ErrorState
+            title="Processing failed"
+            message={statusMsg || 'The RFP could not be processed.'}
+          />
+          <div className="flex justify-center gap-2 pb-4">
+            <Button variant="primary" size="sm" onClick={() => router.push('/proposals/new')}>
+              Upload another RFP
+            </Button>
+            <Button variant="default" size="sm" onClick={() => router.push(`/proposals/${proposal}/workspace`)}>
+              Open workspace
+            </Button>
+          </div>
+        </Card>
+      </div>
+    )
+  }
+
   if (connectionError) {
     return (
       <div className="min-h-[calc(100vh-44px)] bg-[var(--bg-secondary)] flex items-center justify-center px-4">
@@ -79,7 +97,7 @@ export default function ProcessPage({ searchParams }: { searchParams: Promise<{ 
   return (
     <div className="min-h-[calc(100vh-44px)] bg-[var(--bg-secondary)] flex flex-col items-center pt-12 px-4">
       <div className="w-full max-w-lg">
-        <StepIndicator steps={STEPS} className="mb-8" />
+        <StepIndicator steps={PROPOSAL_STEPS('process')} className="mb-8" />
 
         <Card className="mb-4">
           <div className="flex items-center gap-2 mb-1">

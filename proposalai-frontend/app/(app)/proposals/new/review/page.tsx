@@ -5,16 +5,10 @@ import { CheckCircle2, AlertCircle, ArrowLeft } from 'lucide-react'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card, Skeleton, StepIndicator } from '@/components/ui/card'
+import { PROPOSAL_STEPS } from '@/lib/constants/steps'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { useProposal, useDocumentStatus, useRequirements, useSections, useProfile } from '@/lib/hooks'
-import type { Step } from '@/components/ui/card'
 
-const STEPS: Step[] = [
-  { label: 'Upload RFP', status: 'done' },
-  { label: 'Analyze',    status: 'done' },
-  { label: 'Process',    status: 'done' },
-  { label: 'Review',     status: 'active' },
-]
 
 export default function ReviewPage({ searchParams }: { searchParams: Promise<{ proposal?: string }> }) {
   const router = useRouter()
@@ -33,7 +27,7 @@ export default function ReviewPage({ searchParams }: { searchParams: Promise<{ p
   if (!proposal) {
     return (
       <div className="content-narrow">
-        <StepIndicator steps={STEPS} className="mb-6" />
+        <StepIndicator steps={PROPOSAL_STEPS('review')} className="mb-6" />
         <Card>
           <EmptyState
             title="No document to review"
@@ -57,7 +51,7 @@ export default function ReviewPage({ searchParams }: { searchParams: Promise<{ p
   if (failed) {
     return (
       <div className="content-narrow">
-        <StepIndicator steps={STEPS} className="mb-6" />
+        <StepIndicator steps={PROPOSAL_STEPS('review')} className="mb-6" />
         <Card>
           <ErrorState
             title="Could not load the proposal summary"
@@ -95,7 +89,7 @@ export default function ReviewPage({ searchParams }: { searchParams: Promise<{ p
 
   return (
     <div className="content-narrow">
-      <StepIndicator steps={STEPS} className="mb-6" />
+      <StepIndicator steps={PROPOSAL_STEPS('review')} className="mb-6" />
 
       <h1 className="text-lg font-medium mb-1">Review &amp; confirm</h1>
       <p className="text-xs text-[var(--text-secondary)] mb-5">

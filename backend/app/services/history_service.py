@@ -5,6 +5,7 @@ google-genai, and stores them tenant-scoped in `historical_chunks`.
 """
 
 import logging
+from typing import Optional
 from uuid import UUID
 
 from pgvector.psycopg2 import register_vector
@@ -38,12 +39,17 @@ def store_history(
     uploaded_by: UUID,
     source_name: str,
     text: str,
+    proposal_id: Optional[UUID] = None,
     *,
     industry: str | None = None,
     document_type: str | None = None,
     outcome: str | None = None,
 ) -> int:
     """Chunks, embeds, and stores past-performance text. Returns chunks written.
+
+    `proposal_id` picks the pool: None writes to the tenant's long-term library
+    (reusable across bids), a value attaches the document to that one proposal
+    as supporting evidence, and it is removed with the proposal.
 
     `industry`, `document_type` (e.g. "past_performance", "case_study",
     "resume", "capability_statement"), and `outcome` (e.g. "won", "lost") are
@@ -66,20 +72,30 @@ def store_history(
             cur.executemany(
                 """
                 INSERT INTO historical_chunks
-                    (uploaded_by, source_name, content, embedding, industry, document_type, outcome)
-                VALUES (%s, %s, %s, %s, %s, %s, %s);
+                    (uploaded_by, source_name, content, embedding, proposal_id, industry, document_type, outcome)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
                 """,
                 [
-                    (str(uploaded_by), source_name, chunk, vector, industry, document_type, outcome)
+                    (
+                        str(uploaded_by),
+                        source_name,
+                        chunk,
+                        vector,
+                        str(proposal_id) if proposal_id else None,
+                        industry,
+                        document_type,
+                        outcome,
+                    )
                     for chunk, vector in zip(chunks, vectors)
                 ],
             )
     finally:
         conn.close()
     logger.info(
-        "store_history: stored %d chunks for '%s' (industry=%r, document_type=%r, outcome=%r)",
+        "store_history: stored %d chunks for '%s' (%s; industry=%r, document_type=%r, outcome=%r)",
         len(chunks),
         source_name,
+        f"proposal {proposal_id}" if proposal_id else "library",
         industry,
         document_type,
         outcome,
@@ -87,9 +103,38 @@ def store_history(
     return len(chunks)
 
 
-def list_sources(uploaded_by: UUID) -> list[dict]:
-    """Returns each distinct source with its chunk count and tags for a tenant.
+def delete_source(uploaded_by: UUID, source_name: str, proposal_id: Optional[UUID] = None) -> int:
+    """Removes every chunk of one source from one pool. Returns rows deleted.
 
+    Scoped by tenant *and* pool, so deleting a bid's copy of a document never
+    touches the library copy of the same name.
+    """
+    conn = get_connection()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM historical_chunks "
+                "WHERE uploaded_by = %s AND source_name = %s "
+                "AND proposal_id IS NOT DISTINCT FROM %s;",
+                (
+                    str(uploaded_by),
+                    source_name,
+                    str(proposal_id) if proposal_id else None,
+                ),
+            )
+            deleted = cur.rowcount
+    finally:
+        conn.close()
+    logger.info("delete_source: removed %d chunk(s) of '%s'", deleted, source_name)
+    return deleted
+
+
+def list_sources(uploaded_by: UUID, proposal_id: Optional[UUID] = None) -> list[dict]:
+    """Returns each distinct source with its chunk count and tags, for ONE pool.
+
+    None lists the long-term library; a proposal id lists only that bid's
+    supporting documents. The pools are listed separately rather than merged
+    because the two pages that show them mean different things by "my documents".
     Tags are read via MAX(): all chunks from one `store_history` call share
     the same tags by construction, so this is just picking the (single)
     value out of the group, not an aggregation across genuinely different tags.
@@ -103,10 +148,11 @@ def list_sources(uploaded_by: UUID) -> list[dict]:
                        MAX(industry), MAX(document_type), MAX(outcome)
                 FROM historical_chunks
                 WHERE uploaded_by = %s
+                  AND proposal_id IS NOT DISTINCT FROM %s
                 GROUP BY source_name
                 ORDER BY MAX(created_at) DESC;
                 """,
-                (str(uploaded_by),),
+                (str(uploaded_by), str(proposal_id) if proposal_id else None),
             )
             rows = cur.fetchall()
     finally:

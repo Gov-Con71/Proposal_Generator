@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     # chat model id (e.g. Qwen/Qwen2.5-72B-Instruct), EMBEDDING_MODEL to an
     # embedding model (e.g. Qwen/Qwen3-Embedding-8B), and FEATHERLESS_API_KEY.
     llm_provider: str = Field(default="gemini", validation_alias="LLM_PROVIDER")
+    # Declared here so the keys load from .env like every other setting. The
+    # adapters read os.getenv directly, which only ever sees *real* environment
+    # variables — pydantic's env_file populates Settings without exporting into
+    # os.environ. That works under compose (which passes real env vars) and
+    # fails when running the backend on the host per DEPLOYMENT.md §4, where the
+    # key exists only in backend/.env: every call then raises "GEMINI_API_KEY is
+    # not set" and ingestion dies at the extract step.
+    gemini_api_key: str = Field(default="", validation_alias="GEMINI_API_KEY")
+    featherless_api_key: str = Field(default="", validation_alias="FEATHERLESS_API_KEY")
     # gemini-2.0-flash is listed by the API but serves 429 with `limit: 0` — it
     # carries no free-tier request quota, which stalled the whole ingestion
     # pipeline. 2.5-flash is the current generally-available flash model.

@@ -6,17 +6,11 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Input, Textarea, Select } from '@/components/ui/input'
 import { Card, StepIndicator } from '@/components/ui/card'
+import { PROPOSAL_STEPS } from '@/lib/constants/steps'
 import { ErrorState } from '@/components/ui/state'
 import { useProfile } from '@/lib/hooks'
 import type { CompanyProfile } from '@/types'
-import type { Step } from '@/components/ui/card'
 
-const STEPS: Step[] = [
-  { label: 'Upload RFP', status: 'done' },
-  { label: 'Analyze',    status: 'active' },
-  { label: 'Outline',    status: 'pending' },
-  { label: 'Review',     status: 'pending' },
-]
 
 export default function AnalyzePage({ searchParams }: { searchParams: Promise<{ proposal?: string }> }) {
   const { proposal } = use(searchParams)
@@ -70,7 +64,7 @@ function AnalyzeForm({ profile, proposal }: { profile: CompanyProfile; proposal?
         <ArrowLeft className="w-3.5 h-3.5" /> Back
       </Link>
 
-      <StepIndicator steps={STEPS} className="mb-6" />
+      <StepIndicator steps={PROPOSAL_STEPS('analyze')} className="mb-6" />
 
       <h1 className="text-lg font-medium mb-1">Proposal Context</h1>
       <p className="text-xs text-[var(--text-secondary)] mb-5">Provide the foundational organizational and technical data for the AI engine.</p>

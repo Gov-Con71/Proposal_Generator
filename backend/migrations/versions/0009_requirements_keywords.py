@@ -1,7 +1,7 @@
 """Add extracted_requirements.search_keywords
 
 Revision ID: 0009_requirements_keywords
-Revises: 0008_chunks_fulltext
+Revises: 0009_chunks_proposal_scope
 Create Date: 2026-08-16
 
 The compliance extractor already produces, per requirement, a short list of
@@ -19,7 +19,7 @@ from typing import Sequence, Union
 from alembic import op
 
 revision: str = "0009_requirements_keywords"
-down_revision: Union[str, None] = "0008_chunks_fulltext"
+down_revision: Union[str, None] = "0009_chunks_proposal_scope"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

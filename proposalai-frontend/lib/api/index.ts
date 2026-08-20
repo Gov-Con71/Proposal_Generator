@@ -228,17 +228,55 @@ export interface HistoryIngestTags {
   outcome?: string
 }
 
-export const historyApi = {
-  list: () => apiClient.get<HistorySource[]>('/history').then((r) => r.data),
+export interface HistoryIngestResult {
+  sourceName: string
+  chunks: number
+}
 
-  ingest: (sourceName: string, content: string, tags?: HistoryIngestTags) =>
+// Past-performance evidence lives in two pools. Omitting `proposalId` targets
+// the long-term library, reusable across every bid; passing one targets that
+// proposal's own supporting documents, which are deleted with the proposal.
+// Every call takes the same optional argument so the two pages share this API.
+export const historyApi = {
+  list: (proposalId?: string) =>
     apiClient
-      .post<{ sourceName: string; chunks: number }>('/history', {
-        sourceName,
-        content,
-        industry: tags?.industry,
-        documentType: tags?.documentType,
-        outcome: tags?.outcome,
+      .get<HistorySource[]>('/history', { params: proposalId ? { proposalId } : undefined })
+      .then((r) => r.data),
+
+  ingest: (sourceName: string, content: string, proposalId?: string, tags?: HistoryIngestTags) =>
+    apiClient
+      .post<HistoryIngestResult>(
+        '/history',
+        {
+          sourceName,
+          content,
+          industry: tags?.industry,
+          documentType: tags?.documentType,
+          outcome: tags?.outcome,
+        },
+        { params: proposalId ? { proposalId } : undefined },
+      )
+      .then((r) => r.data),
+
+  upload: (file: File, proposalId?: string) => {
+    const form = new FormData()
+    form.append('file', file)
+    // Sent as a form field rather than a query param: the endpoint reads it
+    // with Form(), keeping the whole request in one multipart body.
+    if (proposalId) form.append('proposalId', proposalId)
+    return apiClient
+      .post<HistoryIngestResult>('/history/upload', form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        // Parsing plus a single embedding round-trip; well past the 30s default.
+        timeout: 180_000,
+      })
+      .then((r) => r.data)
+  },
+
+  remove: (sourceName: string, proposalId?: string) =>
+    apiClient
+      .delete(`/history/${encodeURIComponent(sourceName)}`, {
+        params: proposalId ? { proposalId } : undefined,
       })
       .then((r) => r.data),
 }
