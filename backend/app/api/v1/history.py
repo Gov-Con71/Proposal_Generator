@@ -27,7 +27,14 @@ router = APIRouter(prefix="/history", tags=["History (RAG)"])
 def ingest(
     payload: HistoryIngestRequest, user_id: UUID = Depends(get_current_user_id)
 ) -> HistoryIngestResponse:
-    count = history.store_history(user_id, payload.source_name, payload.content)
+    count = history.store_history(
+        user_id,
+        payload.source_name,
+        payload.content,
+        industry=payload.industry,
+        document_type=payload.document_type,
+        outcome=payload.outcome,
+    )
     return HistoryIngestResponse(source_name=payload.source_name, chunks=count)
 
 

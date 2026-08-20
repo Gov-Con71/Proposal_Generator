@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     # separate toggle from the rest of drafting — turn off if that latency/cost
     # isn't worth the retrieval-quality gain for a given deployment.
     draft_use_hyde: bool = Field(default=True, validation_alias="DRAFT_USE_HYDE")
+    # Optional cheaper/faster model for mechanical LLM calls that don't need the
+    # main model's quality — HyDE query generation, compliance-matrix structuring.
+    # Empty (default) means "no tiering": those calls use llm_model, same as
+    # before this setting existed. Set only when the provider actually offers a
+    # cheaper model; the final section draft always uses llm_model regardless.
+    llm_model_light: str = Field(default="", validation_alias="LLM_MODEL_LIGHT")
 
     # --- S3 / object storage (Story 2.2) ---
     use_localstack: bool = Field(default=True, validation_alias="USE_LOCALSTACK")

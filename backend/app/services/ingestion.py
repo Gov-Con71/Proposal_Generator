@@ -17,15 +17,48 @@ from pathlib import Path
 from uuid import UUID
 
 from app.core import cache
+from app.core.config import settings
 from app.services import document_service as docs
 from app.services import proposals_service
-from app.services.compliance_extractor import run_extraction
+from app.services.compliance_extractor import ComplianceMatrix, run_extraction
 from app.services.document_parser import DocumentParseError, parse_to_markdown
+from app.services.extraction_input import chunk_sizes
 from app.services.guardrails import sanitize_matrix, sanitize_solicitation_summary
 from app.services.s3_storage import S3Storage
+from app.services.semantic_chunker import semantic_chunks
 from app.services.solicitation_extractor import run_solicitation_extraction
 
 logger = logging.getLogger(__name__)
+
+
+async def _extract_compliance_matrix(rfp_id: UUID, markdown_text: str) -> ComplianceMatrix:
+    """Extracts the compliance matrix, map-reduce style for oversized RFPs.
+
+    A document within `settings.max_extraction_chars` takes one LLM call, same
+    as before this existed. Beyond that budget, `guard_extraction_input` would
+    otherwise truncate the document and silently drop tail requirements — its
+    own docstring flags chunked/map-reduce extraction as "the real fix". This
+    splits the document into heading-aware chunks (`semantic_chunks`), extracts
+    each independently and concurrently, and merges the results; `sanitize_matrix`
+    (run by the caller) absorbs any requirement re-extracted twice from
+    chunk-boundary overlap via its exact-text dedup.
+    """
+    if len(markdown_text) <= settings.max_extraction_chars:
+        return await run_extraction(markdown_text)
+
+    target, ceiling = chunk_sizes(settings.max_extraction_chars)
+    chunks = semantic_chunks(markdown_text, target_chars=target, max_chars=ceiling)
+    logger.info(
+        "Ingestion rfp=%s: document is %d chars, over the %d extraction budget — "
+        "split into %d chunk(s) for map-reduce extraction.",
+        rfp_id,
+        len(markdown_text),
+        settings.max_extraction_chars,
+        len(chunks),
+    )
+    results = await asyncio.gather(*(run_extraction(chunk) for chunk in chunks))
+    merged = [req for result in results for req in result.requirements]
+    return ComplianceMatrix(requirements=merged)
 
 
 async def _safe_solicitation_summary(rfp_id: UUID, markdown_text: str):
@@ -69,7 +102,7 @@ async def run_ingestion(rfp_id: UUID) -> int:
         # (supplementary). Run them concurrently; a summary failure must not sink
         # ingestion, so it is shielded and its result may be None.
         matrix, summary = await asyncio.gather(
-            run_extraction(markdown_text),
+            _extract_compliance_matrix(rfp_id, markdown_text),
             _safe_solicitation_summary(rfp_id, markdown_text),
         )
         # Verify the summary's citations against the source and drop fabricated

@@ -141,6 +141,147 @@ def test_none_result_raises(monkeypatch):
         asyncio.run(se.run_solicitation_extraction("x"))
 
 
+def _summary(
+    *,
+    solicitation_number: str | None = None,
+    proposal_due_date: str | None = None,
+    submission_method: str | None = None,
+    evaluation_factors: list[EvaluationFactor] | None = None,
+    page_limits: list[PageLimit] | None = None,
+) -> SolicitationSummary:
+    """A mostly-empty summary with just the given fields set — for testing which
+    chunk 'wins' a field on merge, without repeating the whole nested shape."""
+    def c(value: str | None = None) -> Citation:
+        return Citation(value=value, source_quote=(f"quote: {value}" if value else None))
+
+    return SolicitationSummary(
+        administrative=Administrative(
+            solicitation_number=c(solicitation_number),
+            agency_or_organization=c(),
+            title_of_opportunity=c(),
+            naics_code=c(),
+            set_aside_type=c(),
+        ),
+        deadlines=Deadlines(
+            questions_due_date=c(), proposal_due_date=c(proposal_due_date), period_of_performance=c()
+        ),
+        submission_requirements=SubmissionRequirements(
+            submission_method=SubmissionMethod(
+                value=submission_method,
+                description=None,
+                source_quote=(f"quote: {submission_method}" if submission_method else None),
+            ),
+            page_limits=page_limits or [],
+            required_volumes_or_sections=[],
+        ),
+        technical_core=TechnicalCore(primary_objective=c(), key_deliverables=[]),
+        evaluation_factors=evaluation_factors or [],
+        instructions_to_offerors=[],
+    )
+
+
+# --- merge_solicitation_summaries (map-reduce merge) --------------------------
+
+def test_merge_single_summary_returned_unchanged():
+    summary = _full_summary()
+    assert se.merge_solicitation_summaries([summary]) is summary
+
+
+def test_merge_prefers_a_later_chunks_non_null_value_over_an_earlier_null():
+    first = _summary(solicitation_number=None)
+    second = _summary(solicitation_number="W912-25-R-0001")
+
+    merged = se.merge_solicitation_summaries([first, second])
+
+    assert merged.administrative.solicitation_number.value == "W912-25-R-0001"
+
+
+def test_merge_keeps_the_earliest_chunk_when_more_than_one_has_a_value():
+    first = _summary(proposal_due_date="2026-08-15")
+    second = _summary(proposal_due_date="2026-09-01")
+
+    merged = se.merge_solicitation_summaries([first, second])
+
+    assert merged.deadlines.proposal_due_date.value == "2026-08-15"
+
+
+def test_merge_concatenates_list_fields_reported_by_different_chunks():
+    technical = EvaluationFactor(factor="Technical Merit", description="d", importance="high", source_quote="q")
+    past_perf = EvaluationFactor(factor="Past Performance", description="d", importance="med", source_quote="q")
+
+    merged = se.merge_solicitation_summaries(
+        [_summary(evaluation_factors=[technical]), _summary(evaluation_factors=[past_perf])]
+    )
+
+    assert {f.factor for f in merged.evaluation_factors} == {"Technical Merit", "Past Performance"}
+
+
+def test_merge_dedupes_a_fact_restated_in_more_than_one_chunk():
+    """The same evaluation factor can legitimately be re-extracted from two
+    chunks if the source document restates it — merge must not duplicate it."""
+    factor = EvaluationFactor(factor="Technical Merit", description="d1", importance="high", source_quote="q1")
+    restated = EvaluationFactor(factor="Technical Merit", description="d2", importance="high", source_quote="q2")
+
+    merged = se.merge_solicitation_summaries(
+        [_summary(evaluation_factors=[factor]), _summary(evaluation_factors=[restated])]
+    )
+
+    assert len(merged.evaluation_factors) == 1
+
+
+def test_merge_dedupes_page_limits_by_volume_and_limit():
+    limit = PageLimit(volume="Technical", limit="30 pages", source_quote="q1")
+    same_limit_restated = PageLimit(volume="Technical", limit="30 pages", source_quote="q2")
+    different = PageLimit(volume="Pricing", limit="10 pages", source_quote="q3")
+
+    merged = se.merge_solicitation_summaries(
+        [
+            _summary(page_limits=[limit]),
+            _summary(page_limits=[same_limit_restated, different]),
+        ]
+    )
+
+    assert len(merged.submission_requirements.page_limits) == 2
+
+
+def test_merge_submission_method_prefers_first_non_null():
+    first = _summary(submission_method=None)
+    second = _summary(submission_method="Email")
+
+    merged = se.merge_solicitation_summaries([first, second])
+
+    assert merged.submission_requirements.submission_method.value == "Email"
+
+
+# --- run_solicitation_extraction: map-reduce chunking wiring -------------------
+
+def test_run_solicitation_extraction_chunks_and_merges_oversized_documents(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "max_extraction_chars", 1_000)
+
+    calls: list[str] = []
+
+    def fake_extract(markdown_text: str) -> SolicitationSummary:
+        calls.append(markdown_text)
+        # Only the first chunk "finds" the solicitation number — later chunks
+        # report null for it, as a real per-chunk extraction naturally would.
+        return _summary(solicitation_number="SOL-0001" if len(calls) == 1 else None)
+
+    monkeypatch.setattr(se, "_call_extractor", fake_extract)
+
+    filler = " ".join(["requirement"] * 30)
+    parts = [f"C.{i} Clause {i}\nThe contractor shall {filler} for item {i}." for i in range(1, 11)]
+    big_doc = "\n\n".join(parts)
+    assert len(big_doc) > settings.max_extraction_chars
+
+    summary = asyncio.run(se.run_solicitation_extraction(big_doc))
+
+    assert len(calls) > 1  # actually split into multiple chunks
+    assert all(len(c) <= settings.max_extraction_chars for c in calls)
+    assert summary.administrative.solicitation_number.value == "SOL-0001"
+
+
 def test_fabricated_section_l_and_m_citations_are_dropped():
     """The Section L/M lists inherit the existing citation check for free: their
     items are source_quote-bearing dicts with no `value` key, the shape

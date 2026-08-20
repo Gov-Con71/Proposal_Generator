@@ -33,6 +33,34 @@ def _clear_rate_limit_counters():
     yield
     _flush()
 
+
+@pytest.fixture(autouse=True)
+def _clear_hyde_cache():
+    """Drops cached HyDE narratives (`hyde:*`) around every test.
+
+    `_hyde_document` (draft_writer) caches by content hash of (section_title,
+    requirement_text) — several tests reuse the same title/text pair with
+    different mocked LLM responses, and without this a later test can get a
+    cache hit seeded by an earlier one instead of exercising its own mock.
+    Same rationale as `_clear_rate_limit_counters` above, different Redis DB
+    (CACHE_URL vs the rate limiter's).
+    """
+    def _flush():
+        try:
+            from app.core.cache import _redis
+
+            client = _redis()
+            keys = client.keys("hyde:*")
+            if keys:
+                client.delete(*keys)
+        except Exception:  # noqa: BLE001 — no Redis: cache fails open anyway
+            pass
+
+    _flush()
+    yield
+    _flush()
+
+
 @pytest.fixture
 def other_tenant():
     """A second, real user id — for tenant-isolation assertions.

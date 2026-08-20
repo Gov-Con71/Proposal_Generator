@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import Literal, Optional, TypedDict
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -10,7 +10,11 @@ _SYSTEM_PROMPT = (
     "You are a government contracting compliance analyst. "
     "Extract every hard compliance rule, deliverable, and vendor requirement "
     "from the RFP document below. For each item capture: the section number "
-    "exactly as it appears, the verbatim requirement text, and its category.\n"
+    "exactly as it appears, the verbatim requirement text, its category, and "
+    "2-5 search keywords (concrete nouns/phrases — certifications, standards, "
+    "clause numbers, technical terms — someone would use to find prior-contract "
+    "evidence for this specific requirement; not generic words like "
+    "'requirement' or 'contractor').\n"
     "Categories:\n"
     "  Technical — what the contractor must do, build, or deliver.\n"
     "  Security — clearances, safeguarding, cyber/CMMC, physical security.\n"
@@ -45,6 +49,11 @@ class ExtractedRequirement(BaseModel):
     section_number: str
     raw_text_content: str
     category: Literal["Technical", "Security", "Past Performance", "Instruction", "Evaluation Criteria"]
+    # Concrete terms for locating past-performance evidence for this
+    # requirement specifically — not a summary of it. Defaulted, not required:
+    # a provider that can't produce good keywords for a given item should omit
+    # them rather than pad with generic filler to satisfy the schema.
+    search_keywords: list[str] = Field(default_factory=list)
 
 
 class ComplianceMatrix(BaseModel):
@@ -74,7 +83,11 @@ def _extract_compliance_node(state: ExtractionState) -> ExtractionState:
         "_extract_compliance_node: sending %d chars of markdown to the LLM",
         len(document),
     )
-    result: ComplianceMatrix = get_llm().generate_structured(
+    # "light" tier: structured extraction is mechanical (schema-constrained,
+    # not prose judgment) and a good fit for a cheaper model where the provider
+    # has one — see LLM_MODEL_LIGHT. Falls back to the main model when unset,
+    # so this is a no-op change until an operator opts in.
+    result: ComplianceMatrix = get_llm(tier="light").generate_structured(
         f"DOCUMENT:\n{document}",
         ComplianceMatrix,
         system=_SYSTEM_PROMPT,

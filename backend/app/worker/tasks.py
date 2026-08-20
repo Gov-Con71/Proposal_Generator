@@ -57,12 +57,16 @@ def ingest_document(self, rfp_id: str) -> dict:
     default_retry_delay=10,
     acks_late=True,
 )
-def draft_proposal(self, proposal_id: str) -> dict:
+def draft_proposal(self, proposal_id: str, retrieval_filters: dict | None = None) -> dict:
     """Runs the drafting agent for one proposal: plan → draft → critique → persist.
 
     Takes a **proposal id**, not an rfp id — sections belong to the proposal, so
     the agent has to know which one it is drafting. The API route authorises it
     before queueing.
+
+    `retrieval_filters` (e.g. `{"outcome": "won"}`) is the optional knowledge-
+    base pre-filter passed through from the request; None (the default) means
+    every section drafts unfiltered, as before this existed.
 
     The agent flips processing_status to 'drafting'/'drafted'/'draft_failed'; this
     task just retries transient LLM/DB hiccups.
@@ -70,7 +74,7 @@ def draft_proposal(self, proposal_id: str) -> dict:
     applog.bind_context(proposal_id=proposal_id)
     logger.info("Task draft_proposal received proposal_id=%s", proposal_id)
     try:
-        result = run_drafting_sync(proposal_id)
+        result = run_drafting_sync(proposal_id, retrieval_filters=retrieval_filters)
         return {
             "proposal_id": proposal_id,
             "sections": result["sections"],

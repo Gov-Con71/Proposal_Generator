@@ -13,6 +13,7 @@ dashboard linked a proposal id, so every workspace opened from the dashboard
 """
 
 import logging
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -21,6 +22,7 @@ from app.core import cache
 from app.core.deps import get_current_user_id, require_writer
 from app.models.contract import (
     CamelModel,
+    DraftRequest,
     GenerateSectionRequest,
     ProposalSection,
     Requirement,
@@ -196,13 +198,21 @@ def regenerate_section(section_id: UUID, user_id: UUID = Depends(get_current_use
     summary="Generate a full proposal draft with the AI writer agent (async)",
 )
 def draft_proposal(
-    proposal_id: UUID, user_id: UUID = Depends(get_current_user_id)
+    proposal_id: UUID,
+    payload: Optional[DraftRequest] = None,
+    user_id: UUID = Depends(get_current_user_id),
 ) -> DraftQueuedResponse:
     """Queues the drafting agent for one proposal.
 
     Addressed by proposal, not by document (it was `POST /documents/{rfp_id}/draft`
     until sections became proposal-scoped): drafting writes a proposal's own
     sections, and one RFP can back several proposals.
+
+    An optional JSON body (`DraftRequest`) narrows every section's knowledge-
+    base retrieval to matching `industry`/`documentType`/`outcome` tags (see
+    `retrieval.search_similar`) — e.g. draft using only past performance tagged
+    `outcome: "won"`. Omitting the body (or any of its fields) drafts unfiltered,
+    exactly as before this existed.
 
     Poll `GET /proposals/{proposalId}` for `draftingStatus` ('drafting' →
     'drafted', or 'draft_failed' with `draftingFailureReason`) and
@@ -224,8 +234,27 @@ def draft_proposal(
     # it just requested was already finished.
     proposals_service.set_drafting_status(proposal_id, "drafting")
     # Authorised here, before queueing: the worker resolves the proposal without
-    # a tenant check because it has no request identity.
-    celery_app.send_task("draft_proposal", args=[str(proposal_id)])
+    # a tenant check because it has no request identity. Filters go through
+    # kwargs, not args, so the common (unfiltered) call's args stay exactly
+    # [proposal_id] — no shape change for the overwhelming majority of callers.
+    retrieval_filters = (
+        {
+            k: v
+            for k, v in {
+                "industry": payload.industry,
+                "document_type": payload.document_type,
+                "outcome": payload.outcome,
+            }.items()
+            if v is not None
+        }
+        if payload
+        else {}
+    )
+    celery_app.send_task(
+        "draft_proposal",
+        args=[str(proposal_id)],
+        kwargs={"retrieval_filters": retrieval_filters} if retrieval_filters else {},
+    )
     return DraftQueuedResponse(
         proposal_id=str(proposal_id),
         rfp_id=str(rfp_id),

@@ -186,14 +186,22 @@ def get_requirements(rfp_id: UUID) -> list[dict]:
     """Returns the extracted compliance requirements for a document.
 
     Used by the drafting agent to plan and ground proposal sections. Ordered by
-    creation so a positional reference index is stable within a single run.
+    `extraction_order` — the extraction's own list order, roughly the source
+    RFP's document order — not `created_at`: `insert_requirements` bulk-inserts
+    via `executemany`, and Postgres's CURRENT_TIMESTAMP is fixed for the whole
+    transaction, so every row from one extraction shares the exact same
+    created_at. `ORDER BY created_at` alone is then a tie across the entire
+    batch — i.e. always, for every RFP ever ingested — and its resolution is
+    undefined (observed to vary run over run on an otherwise-untouched table).
     """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT requirement_id, section_number, raw_text_content, category "
-                "FROM extracted_requirements WHERE rfp_id = %s ORDER BY created_at;",
+                "SELECT requirement_id, section_number, raw_text_content, category, "
+                "search_keywords "
+                "FROM extracted_requirements WHERE rfp_id = %s "
+                "ORDER BY extraction_order, requirement_id;",
                 (str(rfp_id),),
             )
             rows = cur.fetchall()
@@ -205,6 +213,7 @@ def get_requirements(rfp_id: UUID) -> list[dict]:
             "section_number": r[1],
             "raw_text_content": r[2],
             "category": r[3],
+            "search_keywords": r[4] or [],
         }
         for r in rows
     ]
@@ -219,6 +228,7 @@ def insert_proposal_section(
     review_notes: str | None = None,
     confidence: float = 0.0,
     reference_tags: list[str] | None = None,
+    sort_order: int = 0,
 ) -> UUID:
     """Inserts one drafted proposal section and returns its id.
 
@@ -235,6 +245,13 @@ def insert_proposal_section(
     `confidence` and `reference_tags` record how well-evidenced the draft is —
     see `draft_writer.grounding_confidence`. Defaulted so the non-RAG callers
     (an empty section created by hand) store the honest 0/[] rather than nothing.
+
+    `sort_order` is the section's position in the *planned* outline, not its
+    insertion order — sections draft concurrently, so whichever needs fewer
+    critic-revision rounds inserts first regardless of outline position. Callers
+    outside the drafting agent (a manually-created section) should leave the
+    default and instead append via workspace_service.create_section's
+    MAX(sort_order)+1, so a hand-added section doesn't jump ahead of drafted ones.
     """
     section_id = uuid4()
     conn = get_connection()
@@ -245,8 +262,8 @@ def insert_proposal_section(
                 INSERT INTO proposal_sections
                     (section_id, proposal_id, requirement_id, section_title,
                      generated_draft_content, status, review_notes,
-                     ai_confidence_score, reference_tags)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                     ai_confidence_score, reference_tags, sort_order)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
                 """,
                 (
                     str(section_id),
@@ -258,6 +275,7 @@ def insert_proposal_section(
                     review_notes,
                     confidence,
                     Json(reference_tags or []),
+                    sort_order,
                 ),
             )
     finally:
@@ -280,8 +298,8 @@ def insert_requirements(rfp_id: UUID, matrix: "ComplianceMatrix") -> int:
     links are simply cleared.
     """
     rows = [
-        (str(rfp_id), r.section_number, r.raw_text_content, r.category)
-        for r in matrix.requirements
+        (str(rfp_id), r.section_number, r.raw_text_content, r.category, r.search_keywords, i)
+        for i, r in enumerate(matrix.requirements)
     ]
     conn = get_connection()
     try:
@@ -295,8 +313,9 @@ def insert_requirements(rfp_id: UUID, matrix: "ComplianceMatrix") -> int:
                 cur.executemany(
                     """
                     INSERT INTO extracted_requirements
-                        (rfp_id, section_number, raw_text_content, category)
-                    VALUES (%s, %s, %s, %s);
+                        (rfp_id, section_number, raw_text_content, category, search_keywords,
+                         extraction_order)
+                    VALUES (%s, %s, %s, %s, %s, %s);
                     """,
                     rows,
                 )

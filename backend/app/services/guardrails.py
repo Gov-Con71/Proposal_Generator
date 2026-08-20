@@ -46,6 +46,7 @@ def sanitize_matrix(matrix: ComplianceMatrix) -> tuple[ComplianceMatrix, int]:
                 section_number=(r.section_number or "").strip() or "N/A",
                 raw_text_content=text,
                 category=r.category,
+                search_keywords=r.search_keywords,
             )
         )
 

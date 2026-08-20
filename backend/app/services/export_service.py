@@ -16,6 +16,7 @@ here, so neither the router nor the renderer knows about the other.
 
 import io
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -35,6 +36,28 @@ from app.services.s3_storage import S3Storage
 logger = logging.getLogger(__name__)
 
 _COLS = "job_id, proposal_id, format, status, download_url, created_at, expires_at"
+
+# The drafting agent tags every requirement-answering paragraph/bullet with an
+# inline `[Req 3]`-style marker (draft_writer._SECTION_SYSTEM_PROMPT) for
+# internal compliance traceability during review. It has no business appearing
+# in a document actually delivered to a contracting officer, so it's stripped
+# here — the leading space is stripped along with it so removal doesn't leave
+# a double space or a trailing space before punctuation (e.g. "reliability .").
+#
+# A paragraph answering several requirements at once is tagged with all of
+# them, and the model repeats "Req" before every number (`[Req 1, Req 2, Req
+# 3]`), not just the first — an earlier version of this pattern assumed a
+# single "Req" prefix with a bare comma-separated number list (`[Req 1, 2,
+# 3]`) and silently failed to match the model's actual repeated-prefix output,
+# leaving multi-requirement tags in the delivered document. `(?:Req\s+)?`
+# accepts both shapes.
+_REQUIREMENT_TAG_RE = re.compile(
+    r"\s*\[Req\s+\d+(?:\s*,\s*(?:Req\s+)?\d+)*\]", re.IGNORECASE
+)
+
+
+def _strip_requirement_tags(text: str) -> str:
+    return _REQUIREMENT_TAG_RE.sub("", text)
 
 
 def _now() -> datetime:
@@ -148,7 +171,7 @@ def _assemble_doc(created_by: UUID, proposal_id: str) -> ExportDoc:
     return ExportDoc(
         title=title,
         subtitle=f"Compliance score: {matrix.compliance_score}% · {matrix.counts.all} requirements",
-        sections=[{"title": s.title, "content": s.content} for s in sections],
+        sections=[{"title": s.title, "content": _strip_requirement_tags(s.content)} for s in sections],
         requirements=[
             {"number": r.number, "section": r.section, "status": r.compliance_status, "text": r.text}
             for r in matrix.requirements

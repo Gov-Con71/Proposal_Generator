@@ -31,9 +31,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH"
 
 # libgomp1 is the one runtime shared lib the native wheels need (onnxruntime,
-# pulled in by markitdown[all] for content sniffing).
+# pulled in by markitdown[all] for content sniffing). tesseract-ocr is the OCR
+# engine pytesseract shells out to — the last-resort fallback for scanned,
+# image-only PDFs neither pdfplumber nor MarkItDown can extract a text layer
+# from. eng-only language data keeps the image small; add more tesseract-ocr-*
+# packages here if non-English OCR is ever needed.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
+    && apt-get install -y --no-install-recommends libgomp1 tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/venv /opt/venv
@@ -41,8 +45,10 @@ COPY --from=builder /opt/venv /opt/venv
 RUN useradd --create-home --uid 1001 appuser
 WORKDIR /code
 COPY --chown=appuser:appuser . .
+RUN chmod +x entrypoint.sh
 USER appuser
 
 EXPOSE 8000
 
+ENTRYPOINT ["./entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

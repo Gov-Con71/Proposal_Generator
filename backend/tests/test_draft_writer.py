@@ -416,7 +416,7 @@ def test_retrieve_section_context_uses_the_hyde_document_as_the_query(monkeypatc
     monkeypatch.setattr(
         _dw,
         "get_llm",
-        lambda: _FakeProvider(
+        lambda tier="default": _FakeProvider(
             "We delivered 412 depot overhauls on schedule under W91QUZ-19-C-0042."
         ),
     )
@@ -440,6 +440,43 @@ def test_retrieve_section_context_uses_the_hyde_document_as_the_query(monkeypatc
     assert queries_seen == ["We delivered 412 depot overhauls on schedule under W91QUZ-19-C-0042."]
 
 
+def test_hyde_document_is_cached_across_calls(monkeypatch):
+    """A rate-limited retry loop must not regenerate — and re-spend quota on —
+    the same hypothetical narrative every attempt; the second call for the same
+    (section, requirement) pair should be a cache hit, not a second LLM call."""
+    import app.services.draft_writer as _dw
+
+    calls = {"n": 0}
+
+    class _CountingProvider:
+        def generate_text(self, prompt, system=None):
+            calls["n"] += 1
+            return "We delivered 412 depot overhauls under W91QUZ-19-C-0042."
+
+    monkeypatch.setattr(_dw, "get_llm", lambda tier="default": _CountingProvider())
+
+    first = _dw._hyde_document("Technical Approach", "The contractor SHALL deliver widgets.")
+    second = _dw._hyde_document("Technical Approach", "The contractor SHALL deliver widgets.")
+
+    assert first == second == "We delivered 412 depot overhauls under W91QUZ-19-C-0042."
+    assert calls["n"] == 1  # second call was a cache hit
+
+
+def test_hyde_document_cache_key_is_specific_to_the_pair(monkeypatch):
+    """A different requirement must not collide with another's cached narrative."""
+    import app.services.draft_writer as _dw
+
+    responses = iter(["narrative one", "narrative two"])
+    monkeypatch.setattr(
+        _dw, "get_llm", lambda tier="default": _FakeProvider(next(responses))
+    )
+
+    first = _dw._hyde_document("Technical Approach", "Requirement A.")
+    second = _dw._hyde_document("Technical Approach", "Requirement B.")
+
+    assert (first, second) == ("narrative one", "narrative two")
+
+
 def test_retrieve_section_context_falls_back_to_raw_text_when_hyde_fails(monkeypatch):
     """HyDE generation is an extra LLM call and must never block retrieval — a
     failure there falls back to the plain section+requirement query."""
@@ -449,7 +486,7 @@ def test_retrieve_section_context_falls_back_to_raw_text_when_hyde_fails(monkeyp
         def generate_text(self, prompt, system=None):
             raise RuntimeError("provider unavailable")
 
-    monkeypatch.setattr(_dw, "get_llm", lambda: _ExplodingProvider())
+    monkeypatch.setattr(_dw, "get_llm", lambda tier="default": _ExplodingProvider())
 
     queries_seen: list[str] = []
 
@@ -536,7 +573,7 @@ def test_generate_section_draft_enforces_the_heading_guardrail(monkeypatch):
     monkeypatch.setattr(
         _dw,
         "get_llm",
-        lambda: _FakeProvider(
+        lambda tier="default": _FakeProvider(
             "We will deliver the widgets on schedule under this contract, with "
             "no markdown structure of any kind anywhere in this response — just "
             "plain prose describing the approach the offeror intends to take."
@@ -570,7 +607,7 @@ def test_generate_section_draft_citations_carry_content_for_the_critic(monkeypat
     monkeypatch.setattr(
         _dw,
         "get_llm",
-        lambda: _FakeProvider(
+        lambda tier="default": _FakeProvider(
             "## Technical Approach\n\nWe will deliver the widgets on schedule, "
             "drawing on our prior depot overhaul work under W91QUZ-19-C-0042, "
             "which demonstrates the throughput this delivery schedule requires. "

@@ -6,8 +6,13 @@ from app.services.compliance_extractor import ComplianceMatrix, ExtractedRequire
 from app.services.guardrails import DraftGuardrailError, sanitize_matrix, validate_draft
 
 
-def _req(text, section="C.1", category="Technical"):
-    return ExtractedRequirement(section_number=section, raw_text_content=text, category=category)
+def _req(text, section="C.1", category="Technical", search_keywords=None):
+    return ExtractedRequirement(
+        section_number=section,
+        raw_text_content=text,
+        category=category,
+        search_keywords=search_keywords or [],
+    )
 
 
 def test_sanitize_drops_blank_and_duplicates():
@@ -34,6 +39,17 @@ def test_sanitize_defaults_missing_section_and_trims():
 def test_sanitize_caps_runaway_length():
     clean, _ = sanitize_matrix(ComplianceMatrix(requirements=[_req("A" * 9000)]))
     assert len(clean.requirements[0].raw_text_content) <= 4000
+
+
+def test_sanitize_preserves_search_keywords():
+    """sanitize_matrix rebuilds each ExtractedRequirement from scratch (to trim/
+    reject fields) — a field added to the schema and not threaded through here
+    would silently vanish between extraction and the DB insert."""
+    matrix = ComplianceMatrix(
+        requirements=[_req("MFA is REQUIRED.", search_keywords=["MFA", "CMMC"])]
+    )
+    clean, _ = sanitize_matrix(matrix)
+    assert clean.requirements[0].search_keywords == ["MFA", "CMMC"]
 
 
 def test_validate_draft_accepts_and_rejects():

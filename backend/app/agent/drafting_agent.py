@@ -230,6 +230,9 @@ class DraftingState(TypedDict):
     section: dict                    # one resolved section (title/brief/requirements/criteria/content)
     sol_context: Optional[str]       # document-level framing from the solicitation summary
     company_context: Optional[str]   # the offeror's verifiable facts from company_profiles
+    retrieval_filters: Optional[dict]  # knowledge-base pre-filter (industry/document_type/
+                                        # outcome — see retrieval.search_similar), None means
+                                        # unfiltered, the default for every caller today
     attempts: int                    # draft attempts spent on this section
     feedback: Optional[str]          # latest critic feedback (used for review_notes)
     feedback_history: list[str]      # every round's critic feedback, oldest first —
@@ -504,6 +507,7 @@ def _draft_section_node(state: DraftingState) -> DraftingState:
             evaluation_criteria=section.get("evaluation_criteria"),
             win_themes=section.get("win_themes"),
             target_words=section.get("target_words"),
+            retrieval_filters=state.get("retrieval_filters"),
         )
         content = result["content"]
         # Quality signal, not core data — default to "not grounded" so a writer
@@ -809,6 +813,11 @@ def _save_section_node(state: DraftingState) -> DraftingState:
         review_notes=review_notes,
         confidence=grounding_confidence(citations) if content else 0.0,
         reference_tags=reference_tags(citations) if content else [],
+        # Position in the planned outline (set by run_drafting when it fanned
+        # out), not insertion order — sections draft concurrently, so this is
+        # the only thing that preserves the outline's (Section-L-mirroring)
+        # sequence once concurrent completion times are involved.
+        sort_order=section.get("sort_order", 0),
     )
     return {**state, "section_id": str(section_id)}
 
@@ -849,7 +858,7 @@ def _get_graph():
 # Public entry points
 # ---------------------------------------------------------------------------
 
-async def run_drafting(proposal_id: UUID) -> dict:
+async def run_drafting(proposal_id: UUID, retrieval_filters: Optional[dict] = None) -> dict:
     """Drafts one proposal. Returns a summary of saved sections.
 
     Addressed by **proposal**, not by RFP: sections are the proposal's own work
@@ -865,6 +874,11 @@ async def run_drafting(proposal_id: UUID) -> dict:
     from one solicitation were overwriting each other's progress, and one run's
     failure was displayed against the other. `rfp_documents.processing_status`
     now only ever describes ingestion.
+
+    `retrieval_filters` (e.g. `{"outcome": "won"}`) narrows the knowledge-base
+    search every section's retrieval runs against — see `retrieval.
+    search_similar`. None (the default) applies no filter, so an ordinary
+    drafting request behaves exactly as before this existed.
     """
     proposal = UUID(str(proposal_id))
     rfp = proposals_service.rfp_for_proposal_unscoped(proposal)
@@ -906,13 +920,18 @@ async def run_drafting(proposal_id: UUID) -> dict:
 
         semaphore = asyncio.Semaphore(settings.draft_max_concurrency)
 
-        async def _draft_one(section: dict) -> Optional[str]:
+        async def _draft_one(outline_index: int, section: dict) -> Optional[str]:
+            # Outline position, not completion order — sections draft
+            # concurrently below, so insertion order alone would not preserve
+            # this. Read by _save_section_node via section["sort_order"].
+            section["sort_order"] = outline_index
             state: DraftingState = {
                 "proposal_id": str(proposal),
                 "uploaded_by": uploaded_by,
                 "section": section,
                 "sol_context": sol_context,
                 "company_context": company_context,
+                "retrieval_filters": retrieval_filters,
                 "attempts": 0,
                 "feedback": None,
                 "feedback_history": [],
@@ -936,7 +955,9 @@ async def run_drafting(proposal_id: UUID) -> dict:
                     return None
                 return final["section_id"]
 
-        section_ids = await asyncio.gather(*(_draft_one(s) for s in outline))
+        section_ids = await asyncio.gather(
+            *(_draft_one(i, s) for i, s in enumerate(outline))
+        )
     except Exception as exc:
         proposals_service.set_drafting_status(
             proposal, "draft_failed", docs.failure_reason(exc)
@@ -961,6 +982,6 @@ async def run_drafting(proposal_id: UUID) -> dict:
     }
 
 
-def run_drafting_sync(proposal_id: UUID) -> dict:
+def run_drafting_sync(proposal_id: UUID, retrieval_filters: Optional[dict] = None) -> dict:
     """Synchronous wrapper (for the Celery worker / step 5)."""
-    return asyncio.run(run_drafting(UUID(str(proposal_id))))
+    return asyncio.run(run_drafting(UUID(str(proposal_id)), retrieval_filters=retrieval_filters))

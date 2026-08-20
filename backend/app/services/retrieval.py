@@ -93,8 +93,38 @@ def _rows_to_hits(rows) -> list[dict]:
     ]
 
 
+def _build_filter_clause(
+    industry: str | None, document_type: str | None, outcome: str | None
+) -> tuple[str, tuple]:
+    """SQL AND-clause (plus its params) for the optional metadata pre-filter.
+
+    Each argument is an exact-match filter, applied before the similarity
+    ranking rather than after — a tenant's knowledge base can hold chunks from
+    several industries or outcomes, and asking for e.g. only `outcome="won"`
+    should shrink the candidate pool the vector/keyword search ranks over, not
+    just tag the results after the fact. Omitted (None) filters add nothing,
+    so a caller supplying none of the three gets exactly the unfiltered query.
+    """
+    clauses: list[str] = []
+    params: list[str] = []
+    for column, value in (("industry", industry), ("document_type", document_type), ("outcome", outcome)):
+        if value is not None:
+            clauses.append(f"{column} = %s")
+            params.append(value)
+    if not clauses:
+        return "", ()
+    return " AND " + " AND ".join(clauses), tuple(params)
+
+
 def search_similar(
-    uploaded_by: UUID, query: str, top_k: int = 5, min_score: float = 0.0
+    uploaded_by: UUID,
+    query: str,
+    top_k: int = 5,
+    min_score: float = 0.0,
+    *,
+    industry: str | None = None,
+    document_type: str | None = None,
+    outcome: str | None = None,
 ) -> list[dict]:
     """Returns the top_k most relevant historical chunks for the tenant.
 
@@ -111,26 +141,32 @@ def search_similar(
     then present to the model as evidence — the floor makes "nothing relevant"
     an explicit empty result instead. Defaults to 0.0, preserving the previous
     behaviour for callers that do not opt in.
+
+    `industry` / `document_type` / `outcome` pre-filter the candidate pool by
+    the tags `history_service.store_history` attaches at ingest — e.g. restrict
+    a search to one industry, or to chunks tagged `outcome="won"`. All default
+    to None (no filtering), so an existing caller's behavior is unchanged.
     """
     if not query.strip():
         return []
     query_vec = _vector_literal(embed_query(query))
     fetch_k = max(top_k * _FETCH_MULTIPLIER, _MIN_FETCH)
+    filter_sql, filter_params = _build_filter_clause(industry, document_type, outcome)
 
     conn = get_connection()
     try:
         with conn.cursor() as cur:
             # Dense leg: semantic proximity — best for paraphrase/register variance.
             cur.execute(
-                """
+                f"""
                 SELECT chunk_id, source_name, content,
                        1 - (embedding <=> %s::vector) AS score
                 FROM historical_chunks
-                WHERE uploaded_by = %s AND embedding IS NOT NULL
+                WHERE uploaded_by = %s AND embedding IS NOT NULL{filter_sql}
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s;
                 """,
-                (query_vec, str(uploaded_by), query_vec, fetch_k),
+                (query_vec, str(uploaded_by), *filter_params, query_vec, fetch_k),
             )
             dense_hits = _rows_to_hits(cur.fetchall())
 
@@ -138,16 +174,16 @@ def search_similar(
             # has no parseable terms (plainto_tsquery on an empty/stopword-only
             # string yields an empty tsquery, which matches nothing).
             cur.execute(
-                """
+                f"""
                 SELECT chunk_id, source_name, content,
                        1 - (embedding <=> %s::vector) AS score
                 FROM historical_chunks
-                WHERE uploaded_by = %s AND embedding IS NOT NULL
+                WHERE uploaded_by = %s AND embedding IS NOT NULL{filter_sql}
                   AND content_tsv @@ plainto_tsquery('english', %s)
                 ORDER BY ts_rank(content_tsv, plainto_tsquery('english', %s)) DESC
                 LIMIT %s;
                 """,
-                (query_vec, str(uploaded_by), query, query, fetch_k),
+                (query_vec, str(uploaded_by), *filter_params, query, query, fetch_k),
             )
             keyword_hits = _rows_to_hits(cur.fetchall())
     finally:
