@@ -4,18 +4,12 @@ import { useRouter } from 'next/navigation'
 import { CheckCircle2, Loader2, Circle, XCircle, ArrowRight, Clock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, StepIndicator } from '@/components/ui/card'
+import { PROPOSAL_STEPS } from '@/lib/constants/steps'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { useProcessing } from '@/lib/hooks'
 import { cn } from '@/lib/utils/cn'
 import type { PipelineStep } from '@/types'
-import type { Step } from '@/components/ui/card'
 
-const STEPS: Step[] = [
-  { label: 'Upload RFP', status: 'done' },
-  { label: 'Analyze',    status: 'done' },
-  { label: 'Process',    status: 'active' },
-  { label: 'Review',     status: 'pending' },
-]
 
 export default function ProcessPage({ searchParams }: { searchParams: Promise<{ proposal?: string }> }) {
   const router = useRouter()
@@ -103,7 +97,7 @@ export default function ProcessPage({ searchParams }: { searchParams: Promise<{ 
   return (
     <div className="min-h-[calc(100vh-44px)] bg-[var(--bg-secondary)] flex flex-col items-center pt-12 px-4">
       <div className="w-full max-w-lg">
-        <StepIndicator steps={STEPS} className="mb-8" />
+        <StepIndicator steps={PROPOSAL_STEPS('process')} className="mb-8" />
 
         <Card className="mb-4">
           <div className="flex items-center gap-2 mb-1">

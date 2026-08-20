@@ -387,3 +387,36 @@ export function useExportDownload() {
 
   return { download, status, error }
 }
+
+// ─── use-history.ts (past-performance evidence) ───────────────────────────────
+import { historyApi } from '@/lib/api'
+
+/** Sources in ONE pool: the long-term library, or one bid's supporting docs.
+ *  The pool is part of the query key, so the two pages never share a cache
+ *  entry and switching between them can't show the wrong list. */
+export function useHistorySources(proposalId?: string) {
+  return useQuery({
+    queryKey: ['history', proposalId ?? 'library'],
+    queryFn: () => historyApi.list(proposalId),
+  })
+}
+
+export function useHistoryUpload(proposalId?: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (file: File) => historyApi.upload(file, proposalId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['history', proposalId ?? 'library'] })
+    },
+  })
+}
+
+export function useHistoryRemove(proposalId?: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (sourceName: string) => historyApi.remove(sourceName, proposalId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['history', proposalId ?? 'library'] })
+    },
+  })
+}

@@ -342,6 +342,7 @@ def _retrieve_section_context(
     requirement_texts: list[str],
     top_k: int,
     use_hyde: bool = True,
+    proposal_id: UUID | None = None,
 ) -> tuple[list[dict], int, bool]:
     """Retrieves grounding context per requirement instead of one pooled query.
 
@@ -368,11 +369,19 @@ def _retrieve_section_context(
         hyde = _hyde_document(section_title, req) if use_hyde else None
         query = hyde or f"{section_title}\n{req}"
         hits = search_similar(
-            uploaded_by, query, top_k=per_req_k, min_score=_MIN_CONTEXT_SCORE
+            uploaded_by,
+            query,
+            top_k=per_req_k,
+            min_score=_MIN_CONTEXT_SCORE,
+            proposal_id=proposal_id,
         )
         if not hits:
             hits = search_similar(
-                uploaded_by, query, top_k=per_req_k, min_score=_FALLBACK_CONTEXT_SCORE
+                uploaded_by,
+                query,
+                top_k=per_req_k,
+                min_score=_FALLBACK_CONTEXT_SCORE,
+                proposal_id=proposal_id,
             )
             if hits:
                 weak = True
@@ -430,8 +439,14 @@ def generate_section_draft(
     evaluation_criteria: list[str] | None = None,
     win_themes: list[str] | None = None,
     target_words: int | None = None,
+    proposal_id: UUID | None = None,
 ) -> dict:
     """Drafts a single proposal section grounded in the tenant's context.
+
+    `proposal_id` scopes retrieval: the bid's own supporting documents are
+    preferred and the long-term library only fills what they don't cover.
+    Omitting it searches the library alone, which is the correct behaviour for
+    a proposal whose user skipped the upload step.
 
     Like `generate_draft`, but writes one cohesive section covering several
     requirements at once — the unit the drafting agent persists.
@@ -456,6 +471,7 @@ def generate_section_draft(
         requirement_texts,
         top_k,
         use_hyde=settings.draft_use_hyde,
+        proposal_id=proposal_id,
     )
     if not context:
         # Clear signal: with no past-performance the draft is ungrounded (generic).

@@ -496,6 +496,9 @@ def _draft_section_node(state: DraftingState) -> DraftingState:
     try:
         result = generate_section_draft(
             uploaded_by=UUID(state["uploaded_by"]),
+            # Scopes retrieval to this bid's supporting documents first, with
+            # the long-term library filling whatever they don't cover.
+            proposal_id=UUID(state["proposal_id"]) if state.get("proposal_id") else None,
             section_title=section["title"],
             requirement_texts=requirement_texts,
             feedback=_combined_feedback(state.get("feedback_history") or []),
