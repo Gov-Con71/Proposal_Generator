@@ -222,6 +222,91 @@ def test_export_includes_real_proposal_content(test_client, seeded_proposal, cap
     assert "overhaul the pump" in compliance_csv          # the requirement row
 
 
+def test_strip_requirement_tags_removes_the_marker_and_its_leading_space():
+    assert (
+        export_service._strip_requirement_tags("Overhauled the pump reliably. [Req 3]")
+        == "Overhauled the pump reliably."
+    )
+
+
+def test_strip_requirement_tags_handles_a_comma_separated_list():
+    assert (
+        export_service._strip_requirement_tags("Meets both criteria. [Req 1, 2]")
+        == "Meets both criteria."
+    )
+
+
+def test_strip_requirement_tags_leaves_untagged_text_untouched():
+    text = "No tag on this sentence at all."
+    assert export_service._strip_requirement_tags(text) == text
+
+
+def test_strip_requirement_tags_removes_every_occurrence():
+    text = "First point. [Req 1] Second point. [Req 2]"
+    assert export_service._strip_requirement_tags(text) == "First point. Second point."
+
+
+def test_strip_requirement_tags_handles_repeated_req_prefix():
+    """The model's actual multi-requirement citation shape — repeats "Req"
+    before every number, not a bare comma-separated number list. An earlier
+    version of the pattern only matched "[Req 1, 2, 3]" and silently left
+    this real shape untouched."""
+    text = "Meets all four criteria. [Req 1, Req 2, Req 3, Req 4]"
+    assert export_service._strip_requirement_tags(text) == "Meets all four criteria."
+
+
+def test_strip_requirement_tags_handles_mixed_bare_and_prefixed_numbers():
+    text = "Edge case. [Req 1, 2, Req 3]"
+    assert export_service._strip_requirement_tags(text) == "Edge case."
+
+
+@mock_aws
+def test_export_renders_markdown_and_strips_requirement_tags_end_to_end(
+    test_client, seeded_user, capture_enqueue, monkeypatch
+):
+    """The two export fixes together, through the real assemble -> render path:
+    a [Req N] traceability tag never reaches the delivered document, and
+    Markdown structure is rendered rather than dumped as literal syntax."""
+    monkeypatch.setattr(settings, "use_localstack", False)
+    conn = _conn()
+    with conn, conn.cursor() as cur:
+        rfp_id = _insert_rfp_with_content(cur, seeded_user)
+        proposal_id = str(uuid.uuid4())
+        cur.execute(
+            "INSERT INTO proposals (proposal_id, owned_by, rfp_id, title) VALUES (%s, %s, %s, %s);",
+            (proposal_id, seeded_user, rfp_id, "Pump Overhaul Bid"),
+        )
+        cur.execute(
+            "INSERT INTO proposal_sections (proposal_id, section_title, generated_draft_content, status) "
+            "VALUES (%s, 'Technical Approach', %s, 'draft');",
+            (
+                proposal_id,
+                "## Technical Approach\n\n"
+                "Our certified team performs full teardown and inspection. [Req 1]\n\n"
+                "- OEM-spec parts sourced from approved vendors [Req 2]\n\n"
+                "**Differentiators:** active CMMC Level 2 certification.",
+            ),
+        )
+    conn.close()
+    auth = _auth(seeded_user)
+
+    job = test_client.post("/exports", json={"proposalId": proposal_id, "format": "pdf"}, headers=auth).json()
+    export_service.run_export_render(job["id"])
+    dl = test_client.get(f"/exports/{job['id']}/download", headers=auth)
+
+    import pdfplumber
+
+    with pdfplumber.open(io.BytesIO(dl.content)) as pdf:
+        text = pdf.pages[0].extract_text()
+
+    assert "[Req 1]" not in text
+    assert "[Req 2]" not in text
+    assert "##" not in text
+    assert "**" not in text
+    assert "full teardown and inspection." in text  # tag gone, sentence intact
+    assert "Differentiators:" in text
+
+
 @mock_aws
 def test_export_of_unlinked_proposal_still_renders(test_client, seeded_user, capture_enqueue, monkeypatch):
     monkeypatch.setattr(settings, "use_localstack", False)

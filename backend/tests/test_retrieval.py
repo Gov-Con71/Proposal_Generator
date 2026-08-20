@@ -1,10 +1,11 @@
-"""Unit tests for Reciprocal Rank Fusion — the pure, DB-free half of hybrid
-retrieval (`app/services/retrieval.py`). The SQL side (dense + keyword legs
-against real pgvector/tsvector) is exercised in `tests/test_workspace_rag.py`
-against a live Postgres.
+"""Unit tests for Reciprocal Rank Fusion and the metadata pre-filter clause —
+the pure, DB-free half of hybrid retrieval (`app/services/retrieval.py`). The
+SQL side (dense + keyword legs against real pgvector/tsvector, including the
+pre-filter actually narrowing results) is exercised in
+`tests/test_workspace_rag.py` against a live Postgres.
 """
 
-from app.services.retrieval import _reciprocal_rank_fusion
+from app.services.retrieval import _build_filter_clause, _reciprocal_rank_fusion
 
 
 def _hit(chunk_id: str, score: float) -> dict:
@@ -54,3 +55,29 @@ def test_rrf_handles_an_empty_leg():
 
 def test_rrf_handles_both_legs_empty():
     assert _reciprocal_rank_fusion([], []) == []
+
+
+# --- _build_filter_clause ------------------------------------------------------
+
+def test_filter_clause_empty_when_no_filters_given():
+    sql, params = _build_filter_clause(None, None, None)
+    assert sql == ""
+    assert params == ()
+
+
+def test_filter_clause_single_filter():
+    sql, params = _build_filter_clause("Marine Engineering", None, None)
+    assert sql == " AND industry = %s"
+    assert params == ("Marine Engineering",)
+
+
+def test_filter_clause_combines_all_three_in_order():
+    sql, params = _build_filter_clause("Marine Engineering", "past_performance", "won")
+    assert sql == " AND industry = %s AND document_type = %s AND outcome = %s"
+    assert params == ("Marine Engineering", "past_performance", "won")
+
+
+def test_filter_clause_skips_only_the_omitted_filters():
+    sql, params = _build_filter_clause(None, "case_study", "lost")
+    assert sql == " AND document_type = %s AND outcome = %s"
+    assert params == ("case_study", "lost")

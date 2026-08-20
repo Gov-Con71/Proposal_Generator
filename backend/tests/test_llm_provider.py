@@ -51,6 +51,36 @@ def test_provider_is_cached_until_reset(monkeypatch):
     assert get_llm() is not first  # rebuilt after reset
 
 
+def test_light_tier_falls_back_to_the_main_model_when_unset(monkeypatch):
+    """LLM_MODEL_LIGHT unset is the default deployment state — tiering must be a
+    no-op then, not a crash or a silently different model."""
+    monkeypatch.setattr(settings, "llm_provider", "gemini")
+    monkeypatch.setattr(settings, "llm_model", "gemini-2.5-flash")
+    monkeypatch.setattr(settings, "llm_model_light", "")
+
+    assert get_llm(tier="light")._model == get_llm(tier="default")._model == "gemini-2.5-flash"
+
+
+def test_light_tier_uses_the_configured_light_model(monkeypatch):
+    monkeypatch.setattr(settings, "llm_provider", "gemini")
+    monkeypatch.setattr(settings, "llm_model", "gemini-2.5-pro")
+    monkeypatch.setattr(settings, "llm_model_light", "gemini-2.5-flash-lite")
+
+    assert get_llm(tier="light")._model == "gemini-2.5-flash-lite"
+    assert get_llm(tier="default")._model == "gemini-2.5-pro"
+
+
+def test_tiers_are_cached_independently(monkeypatch):
+    monkeypatch.setattr(settings, "llm_provider", "gemini")
+    monkeypatch.setattr(settings, "llm_model_light", "gemini-2.5-flash-lite")
+
+    light_first = get_llm(tier="light")
+    assert get_llm(tier="light") is light_first  # cached
+    assert get_llm(tier="default") is not light_first  # distinct instance
+    reset_llm()
+    assert get_llm(tier="light") is not light_first  # rebuilt after reset
+
+
 def test_a_custom_provider_satisfies_the_interface():
     """Demonstrates a second platform can be dropped in behind the same port."""
 

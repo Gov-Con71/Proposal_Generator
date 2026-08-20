@@ -1,9 +1,10 @@
 'use client'
 import { useMemo, useState, use } from 'react'
-import { RefreshCw, Loader2, Sparkles, Bold, Italic, List, Link2, ChevronDown, ChevronRight } from 'lucide-react'
+import { RefreshCw, Loader2, Sparkles, Bold, Italic, List, Link2, ChevronDown, ChevronRight, Eye, Pencil } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { StatusDot } from '@/components/ui/card'
 import { ErrorState } from '@/components/ui/state'
+import { SectionContent } from '@/components/ui/section-content'
 import {
   useProposal,
   useRequirements,
@@ -47,6 +48,10 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
   const [collapsed, setCollapsed] = useState<string[]>([])
   const [content, setContent] = useState('')
   const [sectionId, setSectionId] = useState<string | null>(null)
+  // Rendered Markdown preview by default (the drafted content is Markdown —
+  // headings, bullets, bold — and showing it raw is the bug this fixes);
+  // "Edit" switches to the raw-source contentEditable view for making changes.
+  const [isEditing, setIsEditing] = useState(false)
   // Metadata of the section currently open in the canvas (from a full-draft
   // section or a per-requirement generation), for the header badge + notes.
   const [openMeta, setOpenMeta] = useState<
@@ -58,6 +63,7 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
     setContent(s.content)
     setOpenMeta({ title: s.title, status: s.status, reviewNotes: s.reviewNotes })
     setSelectedReqId(null)
+    setIsEditing(false)
   }
 
   const selectedReq = requirements.find((r) => r.id === selectedReqId) ?? requirements[0]
@@ -83,6 +89,7 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
     setSectionId(section.id)
     setContent(section.content)
     setOpenMeta({ title: section.title, status: section.status, reviewNotes: section.reviewNotes })
+    setIsEditing(false)
   }
 
   async function handleSave() {
@@ -254,25 +261,39 @@ export default function WorkspacePage({ params }: { params: Promise<{ id: string
             )
           )}
 
-          <div
-            key={sectionId ?? 'empty'}
-            contentEditable
-            suppressContentEditableWarning
-            onInput={(e) => setContent(e.currentTarget.textContent || '')}
-            className="text-sm text-neutral-700 leading-relaxed min-h-48 focus:outline-none whitespace-pre-wrap"
-          >
-            {content}
-          </div>
+          {isEditing ? (
+            <div
+              key={sectionId ?? 'empty'}
+              contentEditable
+              suppressContentEditableWarning
+              onInput={(e) => setContent(e.currentTarget.textContent || '')}
+              className="text-sm text-neutral-700 leading-relaxed min-h-48 focus:outline-none whitespace-pre-wrap"
+            >
+              {content}
+            </div>
+          ) : (
+            <SectionContent content={content} className="min-h-48" />
+          )}
         </div>
 
         <div className="flex items-center gap-2 px-4 py-2.5 border-t border-neutral-100 shrink-0">
-          <div className="flex items-center gap-1">
-            {[Bold, Italic, List, Link2].map((Icon, i) => (
-              <button key={i} className="w-7 h-7 flex items-center justify-center rounded hover:bg-neutral-100 text-neutral-500 transition-colors">
-                <Icon className="w-3.5 h-3.5" />
-              </button>
-            ))}
-          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={isEditing ? <Eye className="w-3.5 h-3.5" /> : <Pencil className="w-3.5 h-3.5" />}
+            onClick={() => setIsEditing((e) => !e)}
+          >
+            {isEditing ? 'Preview' : 'Edit'}
+          </Button>
+          {isEditing && (
+            <div className="flex items-center gap-1">
+              {[Bold, Italic, List, Link2].map((Icon, i) => (
+                <button key={i} className="w-7 h-7 flex items-center justify-center rounded hover:bg-neutral-100 text-neutral-500 transition-colors">
+                  <Icon className="w-3.5 h-3.5" />
+                </button>
+              ))}
+            </div>
+          )}
           <div className="ml-auto flex items-center gap-4 text-xs text-neutral-400">
             <span>Words: {wordCount}</span>
           </div>

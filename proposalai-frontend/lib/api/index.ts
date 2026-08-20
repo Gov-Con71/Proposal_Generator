@@ -215,6 +215,17 @@ export interface HistorySource {
   sourceName: string
   chunks: number
   createdAt: string
+  // Pre-filter tags set at ingest (see backend retrieval.search_similar) — all
+  // optional, free-text, may be absent on sources ingested before tagging existed.
+  industry?: string | null
+  documentType?: string | null
+  outcome?: string | null
+}
+
+export interface HistoryIngestTags {
+  industry?: string
+  documentType?: string
+  outcome?: string
 }
 
 export interface HistoryIngestResult {
@@ -232,11 +243,19 @@ export const historyApi = {
       .get<HistorySource[]>('/history', { params: proposalId ? { proposalId } : undefined })
       .then((r) => r.data),
 
-  ingest: (sourceName: string, content: string, proposalId?: string) =>
+  ingest: (sourceName: string, content: string, proposalId?: string, tags?: HistoryIngestTags) =>
     apiClient
-      .post<HistoryIngestResult>('/history', { sourceName, content }, {
-        params: proposalId ? { proposalId } : undefined,
-      })
+      .post<HistoryIngestResult>(
+        '/history',
+        {
+          sourceName,
+          content,
+          industry: tags?.industry,
+          documentType: tags?.documentType,
+          outcome: tags?.outcome,
+        },
+        { params: proposalId ? { proposalId } : undefined },
+      )
       .then((r) => r.data),
 
   upload: (file: File, proposalId?: string) => {

@@ -34,3 +34,16 @@ def guard_extraction_input(text: str, *, label: str) -> str:
         limit,
     )
     return text[:limit]
+
+
+def chunk_sizes(budget: int) -> tuple[int, int]:
+    """Target/ceiling chunk sizes for map-reduce extraction, derived from a
+    single-call budget (a quarter/half of it, so each chunk is comfortably
+    under budget rather than barely so). Shared by every extractor that falls
+    back to `semantic_chunks` once its input exceeds `budget` — see
+    `ingestion._extract_compliance_matrix` and
+    `solicitation_extractor.run_solicitation_extraction`.
+    """
+    target = max(1, budget // 4)
+    ceiling = max(target, budget // 2)
+    return target, ceiling

@@ -160,6 +160,10 @@ class Requirement(CamelModel):
     category: RequirementCategory
     type: RequirementType
     compliance_status: ComplianceStatus
+    # Concrete terms (certifications, standards, clause numbers) for locating
+    # past-performance evidence for this requirement — from the extractor, not
+    # user-editable via RequirementUpdate below.
+    search_keywords: list[str] = []
     confidence_score: Optional[float] = None
     proposal_section_id: Optional[str] = None
     proposal_section_title: Optional[str] = None
@@ -216,15 +220,38 @@ class GenerateSectionRequest(CamelModel):
     title: Optional[str] = None
 
 
+class DraftRequest(CamelModel):
+    """Optional knowledge-base pre-filter for a drafting run — see
+    retrieval.search_similar. All fields optional and free-text (not a fixed
+    enum, matching HistoryIngestRequest's tags); omitting the body entirely
+    (or every field) means no filtering, unchanged from before this existed.
+    """
+
+    industry: Optional[str] = None
+    document_type: Optional[str] = None
+    outcome: Optional[str] = None
+
+
 class HistoryIngestRequest(CamelModel):
     source_name: str
     content: str
+    # Pre-filter tags applied to every chunk from this source (see
+    # retrieval.search_similar) — e.g. industry="Marine Engineering",
+    # document_type="past_performance"|"case_study"|"resume"|
+    # "capability_statement", outcome="won"|"lost". All optional; free-text,
+    # not a fixed enum, matching extracted_requirements.category's convention.
+    industry: Optional[str] = None
+    document_type: Optional[str] = None
+    outcome: Optional[str] = None
 
 
 class HistorySource(CamelModel):
     source_name: str
     chunks: int
     created_at: str
+    industry: Optional[str] = None
+    document_type: Optional[str] = None
+    outcome: Optional[str] = None
 
 
 class HistoryIngestResponse(CamelModel):

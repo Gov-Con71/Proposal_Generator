@@ -67,8 +67,14 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/code:Z  # :Z for Podman volume mounting security layers
+      # :z (shared, lowercase) — backend and celery-worker both bind-mount this
+      # dir; a private :Z relabel from one locks the other out under SELinux.
+      - ./backend:/code:z
     environment:
+      # Runs `alembic upgrade head` in entrypoint.sh before uvicorn starts.
+      # Only set here, not on celery-worker (same image/entrypoint) — two
+      # processes racing on migrations at once is the thing to avoid.
+      - RUN_MIGRATIONS=true
       # Internal URLs use compose hostnames, credentials from .env.
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -80,6 +86,9 @@ services:
       - CACHE_URL=redis://redis:6379/2
       - ENVIRONMENT=${ENVIRONMENT:-development}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
+      # Optional cheaper/faster model for HyDE generation and compliance
+      # extraction (see app/core/config.py). Empty (default) means no tiering.
+      - LLM_MODEL_LIGHT=${LLM_MODEL_LIGHT:-}
       # Override in production — the app default is intentionally insecure.
       - JWT_SECRET=${JWT_SECRET:-dev-insecure-change-me}
       - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
@@ -106,6 +115,21 @@ services:
         condition: service_healthy
       localstack:
         condition: service_started
+    # /health is a plain liveness check (no DB/Redis dependency of its own) —
+    # enough to know entrypoint.sh's migration step finished and uvicorn is
+    # actually serving. start_period covers migration time so a slow first
+    # boot doesn't get marked unhealthy before it's had a chance. No curl in
+    # this image, hence the python one-liner.
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
       - app-network
 
@@ -117,7 +141,7 @@ services:
     restart: always
     command: celery -A app.worker.celery_app:celery_app worker --loglevel=info --concurrency=2
     volumes:
-      - ./backend:/code:Z
+      - ./backend:/code:z
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -140,6 +164,7 @@ services:
       # GEMINI_API_KEY must be provided via .env for extraction.
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - FEATHERLESS_API_KEY=${FEATHERLESS_API_KEY:-}
+      - LLM_MODEL_LIGHT=${LLM_MODEL_LIGHT:-}
       # The worker had none of these: no ENVIRONMENT, no SENTRY_DSN, and no
       # logging configuration — so the two longest and most failure-prone paths
       # in the system (ingestion, drafting) reported their exceptions nowhere
@@ -155,6 +180,11 @@ services:
         condition: service_healthy
       localstack:
         condition: service_started
+      # Backend's entrypoint runs `alembic upgrade head` before it reports
+      # healthy — waiting on it here means the worker never picks up a task
+      # against a not-yet-migrated schema on a fresh volume.
+      backend:
+        condition: service_healthy
     networks:
       - app-network
 

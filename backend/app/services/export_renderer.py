@@ -50,8 +50,50 @@ def _latin1(text: str) -> str:
     return (text or "").encode("latin-1", "replace").decode("latin-1")
 
 
+# Headings, bullets, and bold spans in drafted content are parsed by
+# markdown_lite and rendered with real formatting instead of dumping the raw
+# `##`/`-`/`**` Markdown syntax as literal characters into the delivered
+# document — see markdown_lite's module docstring for why that used to happen.
+_PDF_HEADING_SIZES = {1: 15, 2: 13, 3: 12, 4: 11, 5: 11, 6: 11}
+_PDF_BODY_SIZE = 11
+_PDF_LINE_HEIGHT = 6
+# Latin-1 (fpdf2's core-font encoding) middle dot — a plain "•" (U+2022) falls
+# outside Latin-1 and would silently become "?" via `_latin1`'s replace-on-encode.
+_PDF_BULLET = "·"
+
+
+def _emit_pdf_block(pdf, blk) -> None:
+    if blk.kind == "heading":
+        size = _PDF_HEADING_SIZES.get(blk.level, _PDF_BODY_SIZE)
+        pdf.ln(2)
+        for text, _bold in blk.runs:  # headings render bold regardless of ** markers
+            pdf.set_font("Helvetica", "B", size)
+            pdf.write(_PDF_LINE_HEIGHT, _latin1(text))
+        pdf.ln(_PDF_LINE_HEIGHT)
+        pdf.ln(1)
+        return
+
+    if blk.kind == "bullet":
+        pdf.set_x(pdf.l_margin + 5)
+        pdf.set_font("Helvetica", "", _PDF_BODY_SIZE)
+        pdf.write(_PDF_LINE_HEIGHT, _latin1(f"{_PDF_BULLET} "))
+        for text, is_bold in blk.runs:
+            pdf.set_font("Helvetica", "B" if is_bold else "", _PDF_BODY_SIZE)
+            pdf.write(_PDF_LINE_HEIGHT, _latin1(text))
+        pdf.ln(_PDF_LINE_HEIGHT)
+        return
+
+    for text, is_bold in blk.runs:
+        pdf.set_font("Helvetica", "B" if is_bold else "", _PDF_BODY_SIZE)
+        pdf.write(_PDF_LINE_HEIGHT, _latin1(text))
+    pdf.ln(_PDF_LINE_HEIGHT)
+    pdf.ln(1)
+
+
 def _render_pdf(doc: ExportDoc) -> bytes:
     from fpdf import FPDF
+
+    from app.services.markdown_lite import parse as parse_markdown
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -74,8 +116,9 @@ def _render_pdf(doc: ExportDoc) -> bytes:
     for section in doc.sections:
         pdf.set_font("Helvetica", "B", 13)
         block(section.get("title", "Untitled section"), 8)
-        pdf.set_font("Helvetica", "", 11)
-        block(section.get("content") or "(no content)", 6)
+        content = section.get("content") or "(no content)"
+        for blk in parse_markdown(content):
+            _emit_pdf_block(pdf, blk)
         pdf.ln(3)
 
     if doc.requirements:
@@ -94,6 +137,9 @@ def _render_pdf(doc: ExportDoc) -> bytes:
 def _render_xlsx(doc: ExportDoc) -> bytes:
     from openpyxl import Workbook
 
+    from app.services.markdown_lite import parse as parse_markdown
+    from app.services.markdown_lite import to_plain_text
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Proposal"
@@ -103,7 +149,8 @@ def _render_xlsx(doc: ExportDoc) -> bytes:
     ws.append([])
     ws.append(["Section", "Content"])
     for section in doc.sections:
-        ws.append([section.get("title", ""), section.get("content", "")])
+        content = to_plain_text(parse_markdown(section.get("content") or ""))
+        ws.append([section.get("title", ""), content])
 
     grid = wb.create_sheet("Compliance Matrix")
     grid.append(["#", "Section", "Status", "Requirement"])
@@ -165,13 +212,45 @@ def _para(text: str, bold: bool = False, size: int | None = None) -> str:
     return f'<w:p><w:r>{run_props}<w:t xml:space="preserve">{escape(text or "")}</w:t></w:r></w:p>'
 
 
+def _para_runs(runs, *, size: int | None = None) -> str:
+    """One WordprocessingML paragraph with several runs, each independently
+    bold or not (e.g. a sentence with an inline `**bold**` span) — `_para`
+    only supports one run, uniformly formatted."""
+    run_xml = []
+    for text, bold in runs:
+        props = ""
+        if bold or size:
+            props = "<w:rPr>" + ("<w:b/>" if bold else "") + (f'<w:sz w:val="{size}"/>' if size else "") + "</w:rPr>"
+        run_xml.append(f'<w:r>{props}<w:t xml:space="preserve">{escape(text)}</w:t></w:r>')
+    return f"<w:p>{''.join(run_xml)}</w:p>"
+
+
+# Headings, bullets, and bold spans in drafted content are parsed by
+# markdown_lite and rendered as real WordprocessingML formatting instead of
+# dumping raw `##`/`-`/`**` Markdown syntax as literal text — see
+# markdown_lite's module docstring for why that used to happen.
+_DOCX_HEADING_SIZES = {1: 32, 2: 26, 3: 24, 4: 22, 5: 22, 6: 22}
+
+
+def _docx_block(blk) -> str:
+    if blk.kind == "heading":
+        size = _DOCX_HEADING_SIZES.get(blk.level, 22)
+        return _para_runs([(text, True) for text, _bold in blk.runs], size=size)
+    if blk.kind == "bullet":
+        return _para_runs([("• ", False)] + blk.runs)
+    return _para_runs(blk.runs)
+
+
 def _render_docx(doc: ExportDoc) -> bytes:
+    from app.services.markdown_lite import parse as parse_markdown
+
     body = [_para(doc.title, bold=True, size=36)]
     if doc.subtitle:
         body.append(_para(doc.subtitle, size=22))
     for section in doc.sections:
         body.append(_para(section.get("title", "Untitled section"), bold=True, size=28))
-        body.append(_para(section.get("content") or "(no content)"))
+        content = section.get("content") or "(no content)"
+        body.extend(_docx_block(blk) for blk in parse_markdown(content))
     if doc.requirements:
         body.append(_para("Compliance Matrix", bold=True, size=30))
         for r in doc.requirements:

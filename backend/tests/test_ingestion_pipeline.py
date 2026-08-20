@@ -87,6 +87,20 @@ def _count_requirements(rfp_id: str) -> int:
     return count
 
 
+def _fetch_search_keywords(rfp_id: str, section_number: str) -> list[str]:
+    conn = psycopg2.connect(settings.database_url)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT search_keywords FROM extracted_requirements "
+        "WHERE rfp_id = %s AND section_number = %s;",
+        (rfp_id, section_number),
+    )
+    (keywords,) = cur.fetchone()
+    cur.close()
+    conn.close()
+    return keywords
+
+
 def _fetch_summary(rfp_id: str):
     conn = psycopg2.connect(settings.database_url)
     cur = conn.cursor()
@@ -115,6 +129,7 @@ def test_upload_to_requirements_end_to_end(test_client, seeded_user, monkeypatch
                     section_number="H.2",
                     raw_text_content="MFA is REQUIRED for all privileged access.",
                     category="Security",
+                    search_keywords=["MFA", "privileged access", "CMMC"],
                 ),
             ]
         )
@@ -169,6 +184,12 @@ def test_upload_to_requirements_end_to_end(test_client, seeded_user, monkeypatch
 
     # --- rows landed + status advanced ---
     assert _count_requirements(rfp_id) == 2
+
+    # --- search_keywords persisted for the requirement that had them, and the
+    # other requirement (no keywords given) got the column's empty-array
+    # default rather than a null ---
+    assert _fetch_search_keywords(rfp_id, "H.2") == ["MFA", "privileged access", "CMMC"]
+    assert _fetch_search_keywords(rfp_id, "C.3.1") == []
     status_resp = test_client.get(f"/documents/{rfp_id}", headers=auth)
     assert status_resp.status_code == 200
     assert status_resp.json()["processingStatus"] == "completed"

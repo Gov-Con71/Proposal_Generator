@@ -90,10 +90,10 @@ def seeded_rfp():
     )
     cur.executemany(
         "INSERT INTO extracted_requirements (requirement_id, rfp_id, section_number, "
-        "raw_text_content, category) VALUES (%s, %s, %s, %s, %s);",
+        "raw_text_content, category, extraction_order) VALUES (%s, %s, %s, %s, %s, %s);",
         [
-            (req_ids[0], rfp_id, "C.3.1", "The contractor SHALL deliver widgets.", "Technical"),
-            (req_ids[1], rfp_id, "H.2", "MFA is REQUIRED for privileged access.", "Security"),
+            (req_ids[0], rfp_id, "C.3.1", "The contractor SHALL deliver widgets.", "Technical", 0),
+            (req_ids[1], rfp_id, "H.2", "MFA is REQUIRED for privileged access.", "Security", 1),
         ],
     )
     conn.commit()
@@ -107,6 +107,20 @@ def seeded_rfp():
     conn.commit()
     cur.close()
     conn.close()
+
+
+def _fetch_section_titles_in_sort_order(proposal_id: str) -> list[str]:
+    conn = psycopg2.connect(settings.database_url)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT section_title FROM proposal_sections "
+        "WHERE proposal_id = %s ORDER BY sort_order, created_at;",
+        (proposal_id,),
+    )
+    titles = [r[0] for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return titles
 
 
 def _fetch_sections(proposal_id: str) -> list[dict]:
@@ -170,6 +184,92 @@ def test_draft_full_proposal_end_to_end(seeded_rfp, monkeypatch):
     linked = {s["title"]: s["requirement_id"] for s in sections}
     assert linked["Technical Approach"] == req_ids[0]
     assert linked["Security Plan"] == req_ids[1]
+
+
+def test_retrieval_filters_reach_every_sections_draft_call(seeded_rfp, monkeypatch):
+    """The knowledge-base pre-filter passed to run_drafting_sync must reach
+    generate_section_draft for every section — the end-to-end wiring that
+    makes the retrieval pre-filter (previously reachable only by calling
+    draft_writer directly) usable through the real drafting entry point."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt: str) -> ProposalOutline:
+        return ProposalOutline(
+            sections=[
+                _planned("Technical Approach", [0], "tech"),
+                _planned("Security Plan", [1], "sec"),
+            ]
+        )
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)
+    stub, calls = _fake_draft()
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", stub)
+
+    filters = {"outcome": "won", "industry": "Marine Engineering"}
+    result = drafting_agent.run_drafting_sync(proposal_id, retrieval_filters=filters)
+
+    assert result["sections"] == 2
+    assert len(calls) == 2
+    assert all(c["retrieval_filters"] == filters for c in calls)
+
+
+def test_no_retrieval_filters_by_default(seeded_rfp, monkeypatch):
+    """Omitting retrieval_filters (every caller today) must reach the writer as
+    None — no filtering, unchanged from before this existed."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt: str) -> ProposalOutline:
+        return ProposalOutline(sections=[_planned("Technical Approach", [0], "tech")])
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)
+    stub, calls = _fake_draft()
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", stub)
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    assert len(calls) == 1
+    assert calls[0]["retrieval_filters"] is None
+
+
+def test_section_order_follows_the_outline_not_completion_time(seeded_rfp, monkeypatch):
+    """Sections draft concurrently (run_drafting fans out with asyncio.gather),
+    so whichever needs less work can finish — and insert into proposal_sections
+    — before one that comes earlier in the outline. The persisted order must
+    still reflect the outline's (Section-L-mirroring) sequence, not whichever
+    finished first."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt: str) -> ProposalOutline:
+        return ProposalOutline(
+            sections=[
+                _planned("Technical Approach", [0], "tech"),  # outline position 0
+                _planned("Security Plan", [1], "sec"),  # outline position 1
+            ]
+        )
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)
+
+    # "Technical Approach" (outline position 0) is made slower than "Security
+    # Plan" (position 1), so Security Plan is the one expected to actually
+    # finish, and insert its DB row, first.
+    import time
+
+    def fake_section_draft(uploaded_by, section_title, requirement_texts, **kwargs):
+        if section_title == "Technical Approach":
+            time.sleep(0.15)
+        return {"content": f"Draft for {section_title}.", "grounded": True, "citations": []}
+
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    assert _fetch_section_titles_in_sort_order(proposal_id) == [
+        "Technical Approach",
+        "Security Plan",
+    ]
 
 
 def test_critic_drives_one_revision(seeded_rfp, monkeypatch):

@@ -100,6 +100,7 @@ def _to_requirement(row: dict, number: int) -> Requirement:
         category=_map_category(row.get("category")),
         type="mandatory",
         compliance_status=_map_status(row.get("compliance_status")),
+        search_keywords=list(row.get("search_keywords") or []),
         confidence_score=None,
         proposal_section_id=None,
         proposal_section_title=None,
@@ -114,8 +115,18 @@ def list_requirements(rfp_id: UUID, user_id: UUID) -> list[Requirement]:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "SELECT requirement_id, rfp_id, section_number, raw_text_content, "
-                "category, compliance_status, created_at "
-                "FROM extracted_requirements WHERE rfp_id = %s ORDER BY created_at;",
+                "category, compliance_status, search_keywords, created_at "
+                "FROM extracted_requirements WHERE rfp_id = %s "
+                # extraction_order (the extraction's own list order, not
+                # created_at): insert_requirements bulk-inserts via
+                # executemany, and Postgres's CURRENT_TIMESTAMP is fixed for
+                # the whole transaction — every requirement from one
+                # extraction shares the exact same created_at, so ORDER BY
+                # created_at alone ties across the entire batch and its
+                # resolution is undefined (the `number` this feeds into would
+                # then reshuffle between calls with no data change).
+                # requirement_id is a defensive tiebreak beyond that.
+                "ORDER BY extraction_order, requirement_id;",
                 (str(rfp_id),),
             )
             rows = cur.fetchall()
@@ -156,16 +167,23 @@ def update_requirement(requirement_id: UUID, user_id: UUID, patch) -> Requiremen
                 )
             cur.execute(
                 "SELECT requirement_id, rfp_id, section_number, raw_text_content, "
-                "category, compliance_status, created_at "
+                "category, compliance_status, search_keywords, extraction_order, created_at "
                 "FROM extracted_requirements WHERE requirement_id = %s;",
                 (str(requirement_id),),
             )
             updated = cur.fetchone()
-            # number = position by creation order within the proposal
+            # number = position by (extraction_order, requirement_id) — same
+            # order as list_requirements. A `created_at <= %s` position count
+            # would over-count: every requirement from one extraction shares an
+            # identical created_at (see list_requirements), so that comparison
+            # alone is true for the *entire batch*, not just the rows
+            # at-or-before this one — every row in a freshly-ingested RFP would
+            # get the same (batch-size) number. The row-value comparison here
+            # breaks the tie the same way the ORDER BY does.
             cur.execute(
                 "SELECT COUNT(*) AS n FROM extracted_requirements "
-                "WHERE rfp_id = %s AND created_at <= %s;",
-                (str(updated["rfp_id"]), updated["created_at"]),
+                "WHERE rfp_id = %s AND (extraction_order, requirement_id) <= (%s, %s);",
+                (str(updated["rfp_id"]), updated["extraction_order"], updated["requirement_id"]),
             )
             number = cur.fetchone()["n"]
     finally:
@@ -232,7 +250,13 @@ def list_sections(proposal_id: UUID, user_id: UUID) -> list[ProposalSection]:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 f"SELECT {_SECTION_COLS} FROM proposal_sections "
-                "WHERE proposal_id = %s ORDER BY created_at;",
+                # sort_order is the outline's planned position; created_at is
+                # only a tiebreak (e.g. among sections that share the column's
+                # default). See migration 0010 for why created_at alone is
+                # wrong here: sections draft concurrently, so it reflects
+                # completion order, not the outline's — potentially
+                # Section-L-mandated — sequence.
+                "WHERE proposal_id = %s ORDER BY sort_order, created_at;",
                 (str(proposal_id),),
             )
             rows = cur.fetchall()
@@ -270,9 +294,16 @@ def create_section(
     try:
         with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "INSERT INTO proposal_sections (proposal_id, requirement_id, section_title, status) "
-                f"VALUES (%s, %s, %s, 'empty') RETURNING {_SECTION_COLS};",
-                (str(proposal_id), requirement_id, title),
+                "INSERT INTO proposal_sections "
+                "(proposal_id, requirement_id, section_title, status, sort_order) "
+                "VALUES (%s, %s, %s, 'empty', "
+                # Append after the proposal's current sections (drafted or
+                # manual) rather than defaulting to 0, which would jump this
+                # section ahead of an outline-drafted proposal's content.
+                "COALESCE((SELECT MAX(sort_order) FROM proposal_sections "
+                "WHERE proposal_id = %s), -1) + 1) "
+                f"RETURNING {_SECTION_COLS};",
+                (str(proposal_id), requirement_id, title, str(proposal_id)),
             )
             row = cur.fetchone()
     finally:

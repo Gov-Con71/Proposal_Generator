@@ -6,9 +6,12 @@ assemble prompt → generate. The LLM call goes through the provider-agnostic
 `app.services.llm` port, so the AI platform is swappable.
 """
 
+import hashlib
 import logging
+from typing import Optional
 from uuid import UUID
 
+from app.core.cache import cache_get, cache_set
 from app.services.guardrails import validate_draft
 from app.services.llm import get_llm
 from app.services.retrieval import search_similar
@@ -282,6 +285,20 @@ _HYDE_SYSTEM_PROMPT = (
 )
 
 
+# The hypothetical narrative is a pure function of (section_title,
+# requirement_text) — no tenant data goes into the prompt — so it's cacheable
+# across retries *and* across proposals that happen to share a requirement.
+# TTL comfortably covers the LLM retry/backoff window (5 retries can span
+# several minutes on a rate-limited provider); it doesn't need to live much
+# longer than that, since a cache miss just costs one more LLM call.
+_HYDE_CACHE_TTL_SECONDS = 1800
+
+
+def _hyde_cache_key(section_title: str, requirement_text: str) -> str:
+    digest = hashlib.sha256(f"{section_title}\n{requirement_text}".encode()).hexdigest()
+    return f"hyde:{digest[:24]}"
+
+
 def _hyde_document(section_title: str, requirement_text: str) -> str | None:
     """A short hypothetical past-performance narrative answering `requirement_text`.
 
@@ -293,12 +310,24 @@ def _hyde_document(section_title: str, requirement_text: str) -> str | None:
     *hypothetical* narrative answer instead closes that gap. Returns None (the
     caller falls back to the raw-text query) on any generation failure:
     retrieval must never be blocked by this being an extra LLM call.
+
+    Cached (see `_HYDE_CACHE_TTL_SECONDS`) and run on the "light" model tier
+    (LLM_MODEL_LIGHT, falls back to the main model if unset): this call doesn't
+    need the main model's quality, and a rate-limited retry loop on the
+    drafting call would otherwise regenerate the same narrative every attempt,
+    burning quota that was better spent on the draft itself.
     """
+    key = _hyde_cache_key(section_title, requirement_text)
+    cached = cache_get(key)
+    if cached is not None:
+        return cached
     try:
-        return get_llm().generate_text(
+        text = get_llm(tier="light").generate_text(
             f"SECTION: {section_title}\nREQUIREMENT: {requirement_text}",
             system=_HYDE_SYSTEM_PROMPT,
         )
+        cache_set(key, text, ttl=_HYDE_CACHE_TTL_SECONDS)
+        return text
     except Exception:
         logger.warning(
             "_hyde_document: generation failed for '%s' — falling back to the "
@@ -343,6 +372,7 @@ def _retrieve_section_context(
     top_k: int,
     use_hyde: bool = True,
     proposal_id: UUID | None = None,
+    retrieval_filters: Optional[dict] = None,
 ) -> tuple[list[dict], int, bool]:
     """Retrieves grounding context per requirement instead of one pooled query.
 
@@ -354,11 +384,16 @@ def _retrieve_section_context(
     per requirement and unioning the (deduped, diversified) results gives every
     requirement its own shot at evidence, from more than one source.
 
+    `retrieval_filters` (e.g. `{"industry": "...", "outcome": "won"}`) narrows
+    the candidate pool before ranking — see `retrieval.search_similar`. None
+    (the default) applies no filter, unchanged from before this existed.
+
     Returns `(context, grounded_requirement_count, weak_grounding)`: the top-
     `top_k` context blocks across all requirements; how many distinct
     requirements found *any* evidence; and whether any of it only cleared the
     relaxed fallback floor rather than the standard one.
     """
+    filters = retrieval_filters or {}
     # Split the shared top_k budget across requirements (at least 2 each), so a
     # 4-requirement section doesn't get crowded out by one requirement's chunks.
     per_req_k = max(2, -(-top_k // max(1, len(requirement_texts))))
@@ -374,6 +409,7 @@ def _retrieve_section_context(
             top_k=per_req_k,
             min_score=_MIN_CONTEXT_SCORE,
             proposal_id=proposal_id,
+            **filters,
         )
         if not hits:
             hits = search_similar(
@@ -382,6 +418,7 @@ def _retrieve_section_context(
                 top_k=per_req_k,
                 min_score=_FALLBACK_CONTEXT_SCORE,
                 proposal_id=proposal_id,
+                **filters,
             )
             if hits:
                 weak = True
@@ -440,6 +477,7 @@ def generate_section_draft(
     win_themes: list[str] | None = None,
     target_words: int | None = None,
     proposal_id: UUID | None = None,
+    retrieval_filters: Optional[dict] = None,
 ) -> dict:
     """Drafts a single proposal section grounded in the tenant's context.
 
@@ -456,7 +494,9 @@ def generate_section_draft(
     `solicitation_context` (document-level facts from the solicitation summary),
     `company_context` (the offeror's verifiable facts), `evaluation_criteria`
     (the Section M factors this section is scored on), `win_themes`, and
-    `target_words` (derived from any stated page limit).
+    `target_words` (derived from any stated page limit). `retrieval_filters`
+    (e.g. `{"outcome": "won"}`) narrows the knowledge-base search before
+    ranking — see `retrieval.search_similar` — and defaults to no filtering.
     """
     # Retrieve per requirement (not one pooled query) so a multi-requirement
     # section can't have its evidence dominated by whichever requirement is
@@ -472,6 +512,7 @@ def generate_section_draft(
         top_k,
         use_hyde=settings.draft_use_hyde,
         proposal_id=proposal_id,
+        retrieval_filters=retrieval_filters,
     )
     if not context:
         # Clear signal: with no past-performance the draft is ungrounded (generic).
@@ -542,9 +583,18 @@ def generate_section_draft(
     }
 
 
-def generate_draft(uploaded_by: UUID, requirement_text: str, top_k: int = 5) -> dict:
-    """Retrieves context and generates a draft. Returns the prose + citations."""
-    context = search_similar(uploaded_by, requirement_text, top_k=top_k)
+def generate_draft(
+    uploaded_by: UUID,
+    requirement_text: str,
+    top_k: int = 5,
+    retrieval_filters: Optional[dict] = None,
+) -> dict:
+    """Retrieves context and generates a draft. Returns the prose + citations.
+
+    `retrieval_filters` — see `retrieval.search_similar` — defaults to no
+    filtering, unchanged from before this existed.
+    """
+    context = search_similar(uploaded_by, requirement_text, top_k=top_k, **(retrieval_filters or {}))
     prompt = _assemble_prompt(requirement_text, context)
 
     text = get_llm().generate_text(prompt, system=_SYSTEM_PROMPT)

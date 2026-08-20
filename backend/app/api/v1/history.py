@@ -69,7 +69,14 @@ async def ingest(
 ) -> HistoryIngestResponse:
     pool = await _resolve_pool(proposal_id, user_id)
     count = await asyncio.to_thread(
-        history.store_history, user_id, payload.source_name, payload.content, pool
+        history.store_history,
+        user_id,
+        payload.source_name,
+        payload.content,
+        pool,
+        industry=payload.industry,
+        document_type=payload.document_type,
+        outcome=payload.outcome,
     )
     return HistoryIngestResponse(source_name=payload.source_name, chunks=count)
 

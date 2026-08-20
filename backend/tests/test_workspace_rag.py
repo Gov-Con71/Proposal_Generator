@@ -46,11 +46,15 @@ def proposal_with_requirements():
         (proposal_id, user_id, rfp_id),
     )
     cur.executemany(
-        "INSERT INTO extracted_requirements (rfp_id, section_number, raw_text_content, category) "
-        "VALUES (%s, %s, %s, %s);",
+        "INSERT INTO extracted_requirements "
+        "(rfp_id, section_number, raw_text_content, category, search_keywords) "
+        "VALUES (%s, %s, %s, %s, %s);",
         [
-            (rfp_id, "C.3.1", "The contractor SHALL overhaul the pump.", "Technical"),
-            (rfp_id, "H.2", "MFA is REQUIRED for privileged access.", "Security"),
+            (rfp_id, "C.3.1", "The contractor SHALL overhaul the pump.", "Technical", []),
+            (
+                rfp_id, "H.2", "MFA is REQUIRED for privileged access.", "Security",
+                ["MFA", "privileged access"],
+            ),
         ],
     )
     conn.commit()
@@ -82,6 +86,27 @@ def test_requirements_read_and_patch(test_client, proposal_with_requirements, ot
     reqs = r.json()
     assert len(reqs) == 2
     assert reqs[0]["category"] in {"technical", "security"}
+
+    # search_keywords round-trips through the API in camelCase, per-requirement
+    by_section = {r["section"]: r["searchKeywords"] for r in reqs}
+    assert by_section["H.2"] == ["MFA", "privileged access"]
+    assert by_section["C.3.1"] == []
+
+    # `number` must distinguish the two requirements even though the fixture
+    # inserted both via one executemany batch, so they share an identical
+    # created_at (Postgres's CURRENT_TIMESTAMP is fixed per transaction). A
+    # `created_at <=` position query alone is true for the whole batch here,
+    # not just rows before this one, and would return the same (batch-size)
+    # number for every PATCH regardless of which row — this catches that.
+    numbers_by_id = {r["id"]: r["number"] for r in reqs}
+    patched_numbers = set()
+    for r in reqs:
+        resp = test_client.patch(
+            f"/requirements/{r['id']}", json={"complianceStatus": "addressed"}, headers=auth
+        )
+        assert resp.status_code == 200
+        patched_numbers.add(resp.json()["number"])
+    assert patched_numbers == set(numbers_by_id.values())  # {1, 2}, not {2, 2}
 
     # PATCH compliance status persists
     rid = reqs[0]["id"]
@@ -124,6 +149,74 @@ def test_history_ingest_and_retrieval(monkeypatch, test_client, proposal_with_re
     hits = retrieval.search_similar(user_id, "pump overhaul experience", top_k=3)
     assert len(hits) >= 1
     assert hits[0]["source_name"] == "USCG Pump 2024"
+
+
+def test_history_metadata_pre_filters_retrieval(monkeypatch, test_client, proposal_with_requirements):
+    """industry/document_type/outcome tags set at ingest narrow search_similar's
+    candidate pool before ranking, not just label results after the fact —
+    the actual gap this closes (knowledge base had no pre-filter at all)."""
+    from app.services import embeddings, history_service, retrieval
+
+    def fake_embed_texts(texts):
+        return [[0.001 * (i + 1)] * embeddings.EMBED_DIM for i, _ in enumerate(texts)]
+
+    monkeypatch.setattr(history_service, "embed_texts", fake_embed_texts)
+    monkeypatch.setattr(retrieval, "embed_query", lambda t: [0.001] * embeddings.EMBED_DIM)
+
+    user_id = proposal_with_requirements["user_id"]
+    auth = _auth(user_id)
+
+    won = test_client.post(
+        "/history",
+        json={
+            "sourceName": "Won Marine Contract",
+            "content": "We overhauled centrifugal pumps for the USCG on a contract we won. " * 20,
+            "industry": "Marine Engineering",
+            "documentType": "past_performance",
+            "outcome": "won",
+        },
+        headers=auth,
+    )
+    assert won.status_code == 201
+
+    lost = test_client.post(
+        "/history",
+        json={
+            "sourceName": "Lost IT Contract",
+            "content": "We proposed IT modernization services but did not win the award. " * 20,
+            "industry": "IT Services",
+            "documentType": "past_performance",
+            "outcome": "lost",
+        },
+        headers=auth,
+    )
+    assert lost.status_code == 201
+
+    # Tags round-trip through GET /history.
+    sources = {s["sourceName"]: s for s in test_client.get("/history", headers=auth).json()}
+    assert sources["Won Marine Contract"]["outcome"] == "won"
+    assert sources["Won Marine Contract"]["industry"] == "Marine Engineering"
+    assert sources["Lost IT Contract"]["outcome"] == "lost"
+
+    # Unfiltered search sees both sources.
+    all_hits = retrieval.search_similar(user_id, "contract experience", top_k=10)
+    assert {h["source_name"] for h in all_hits} == {"Won Marine Contract", "Lost IT Contract"}
+
+    # Pre-filtered by outcome: only the won source is even a candidate.
+    won_hits = retrieval.search_similar(user_id, "contract experience", top_k=10, outcome="won")
+    assert {h["source_name"] for h in won_hits} == {"Won Marine Contract"}
+
+    # Pre-filtered by industry: only the marine source.
+    marine_hits = retrieval.search_similar(
+        user_id, "contract experience", top_k=10, industry="Marine Engineering"
+    )
+    assert {h["source_name"] for h in marine_hits} == {"Won Marine Contract"}
+
+    # A filter combination matching nothing returns empty, not an error.
+    none_hits = retrieval.search_similar(
+        user_id, "contract experience", top_k=10, industry="Marine Engineering", outcome="lost"
+    )
+    assert none_hits == []
 
 
 def test_generate_section_uses_draft_writer(monkeypatch, test_client, proposal_with_requirements):
@@ -245,6 +338,36 @@ def test_queueing_a_draft_marks_only_that_proposal(
     assert test_client.get(f"/proposals/{second}", headers=auth).json()["draftingStatus"] == "idle"
     doc = test_client.get(f"/documents/{rfp_id}", headers=auth).json()
     assert doc["processingStatus"] == "completed"
+
+
+def test_draft_endpoint_accepts_an_optional_retrieval_filter_body(
+    monkeypatch, test_client, proposal_with_requirements
+):
+    """POST /proposals/{id}/draft with a DraftRequest body forwards the
+    filters to the Celery task via kwargs; the no-body call (every other test
+    in this file) must keep sending exactly args=[proposal_id] — no shape
+    change for the common case."""
+    from app.api.v1 import workspace as wsapi
+
+    queued: list[tuple] = []
+    monkeypatch.setattr(
+        wsapi.celery_app,
+        "send_task",
+        lambda name, args=None, kwargs=None, **kw: queued.append((name, args, kwargs)),
+    )
+
+    proposal_id = proposal_with_requirements["proposal_id"]
+    auth = _auth(proposal_with_requirements["user_id"])
+
+    resp = test_client.post(
+        f"/proposals/{proposal_id}/draft",
+        json={"outcome": "won", "industry": "Marine Engineering"},
+        headers=auth,
+    )
+    assert resp.status_code == 202, resp.text
+    name, args, kwargs = queued[0]
+    assert args == [proposal_id]
+    assert kwargs == {"retrieval_filters": {"outcome": "won", "industry": "Marine Engineering"}}
 
 
 def test_drafting_a_proposal_with_no_requirements_is_a_409(

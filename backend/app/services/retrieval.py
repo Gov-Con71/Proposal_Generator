@@ -97,6 +97,29 @@ def _rows_to_hits(rows, origin: str) -> list[dict]:
     ]
 
 
+def _build_filter_clause(
+    industry: str | None, document_type: str | None, outcome: str | None
+) -> tuple[str, tuple]:
+    """SQL AND-clause (plus its params) for the optional metadata pre-filter.
+
+    Each argument is an exact-match filter, applied before the similarity
+    ranking rather than after — a tenant's knowledge base can hold chunks from
+    several industries or outcomes, and asking for e.g. only `outcome="won"`
+    should shrink the candidate pool the vector/keyword search ranks over, not
+    just tag the results after the fact. Omitted (None) filters add nothing,
+    so a caller supplying none of the three gets exactly the unfiltered query.
+    """
+    clauses: list[str] = []
+    params: list[str] = []
+    for column, value in (("industry", industry), ("document_type", document_type), ("outcome", outcome)):
+        if value is not None:
+            clauses.append(f"{column} = %s")
+            params.append(value)
+    if not clauses:
+        return "", ()
+    return " AND " + " AND ".join(clauses), tuple(params)
+
+
 def _search_pool(
     cur,
     uploaded_by: UUID,
@@ -104,11 +127,15 @@ def _search_pool(
     query_vec: str,
     fetch_k: int,
     proposal_id: Optional[UUID],
+    filter_sql: str,
+    filter_params: tuple,
 ) -> list[dict]:
     """Hybrid search within ONE pool: a proposal's own chunks, or the library.
 
     `proposal_id` None means the long-term library (`proposal_id IS NULL`), so
     a bid's supporting documents never leak into another bid's retrieval.
+    `filter_sql`/`filter_params` (from `_build_filter_clause`) add the optional
+    industry/document_type/outcome pre-filter to both legs.
     """
     scope_sql = "proposal_id = %s" if proposal_id else "proposal_id IS NULL"
     scope_arg: tuple = (str(proposal_id),) if proposal_id else ()
@@ -120,11 +147,11 @@ def _search_pool(
         SELECT chunk_id, source_name, content,
                1 - (embedding <=> %s::vector) AS score
         FROM historical_chunks
-        WHERE uploaded_by = %s AND embedding IS NOT NULL AND {scope_sql}
+        WHERE uploaded_by = %s AND embedding IS NOT NULL AND {scope_sql}{filter_sql}
         ORDER BY embedding <=> %s::vector
         LIMIT %s;
         """,
-        (query_vec, str(uploaded_by), *scope_arg, query_vec, fetch_k),
+        (query_vec, str(uploaded_by), *scope_arg, *filter_params, query_vec, fetch_k),
     )
     dense_hits = _rows_to_hits(cur.fetchall(), origin)
 
@@ -136,12 +163,12 @@ def _search_pool(
         SELECT chunk_id, source_name, content,
                1 - (embedding <=> %s::vector) AS score
         FROM historical_chunks
-        WHERE uploaded_by = %s AND embedding IS NOT NULL AND {scope_sql}
+        WHERE uploaded_by = %s AND embedding IS NOT NULL AND {scope_sql}{filter_sql}
           AND content_tsv @@ plainto_tsquery('english', %s)
         ORDER BY ts_rank(content_tsv, plainto_tsquery('english', %s)) DESC
         LIMIT %s;
         """,
-        (query_vec, str(uploaded_by), *scope_arg, query, query, fetch_k),
+        (query_vec, str(uploaded_by), *scope_arg, *filter_params, query, query, fetch_k),
     )
     keyword_hits = _rows_to_hits(cur.fetchall(), origin)
 
@@ -154,6 +181,10 @@ def search_similar(
     top_k: int = 5,
     min_score: float = 0.0,
     proposal_id: Optional[UUID] = None,
+    *,
+    industry: str | None = None,
+    document_type: str | None = None,
+    outcome: str | None = None,
 ) -> list[dict]:
     """Returns the top_k most relevant historical chunks for the tenant.
 
@@ -178,11 +209,17 @@ def search_similar(
     made to compete on raw similarity against an archive that may be far
     larger. Each hit carries `origin` ("bid" or "library") so callers can tell
     a reviewer where a claim's grounding came from.
+
+    `industry` / `document_type` / `outcome` pre-filter the candidate pool by
+    the tags `history_service.store_history` attaches at ingest — e.g. restrict
+    a search to one industry, or to chunks tagged `outcome="won"`. All default
+    to None (no filtering), so an existing caller's behavior is unchanged.
     """
     if not query.strip():
         return []
     query_vec = _vector_literal(embed_query(query))
     fetch_k = max(top_k * _FETCH_MULTIPLIER, _MIN_FETCH)
+    filter_sql, filter_params = _build_filter_clause(industry, document_type, outcome)
 
     conn = get_connection()
     try:
@@ -190,7 +227,8 @@ def search_similar(
             bid_hits: list[dict] = []
             if proposal_id:
                 bid_hits = _search_pool(
-                    cur, uploaded_by, query, query_vec, fetch_k, proposal_id
+                    cur, uploaded_by, query, query_vec, fetch_k, proposal_id,
+                    filter_sql, filter_params,
                 )
                 bid_hits = [h for h in bid_hits if h["score"] >= min_score][:top_k]
 
@@ -201,7 +239,8 @@ def search_similar(
             library_hits: list[dict] = []
             if remaining > 0:
                 library_hits = _search_pool(
-                    cur, uploaded_by, query, query_vec, fetch_k, None
+                    cur, uploaded_by, query, query_vec, fetch_k, None,
+                    filter_sql, filter_params,
                 )
                 library_hits = [
                     h for h in library_hits if h["score"] >= min_score

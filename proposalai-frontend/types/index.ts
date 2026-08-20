@@ -126,6 +126,9 @@ export interface Requirement {
   category: RequirementCategory
   type: RequirementType
   complianceStatus: ComplianceStatus
+  /** Concrete terms (certifications, standards, clause numbers) for locating
+   *  past-performance evidence for this requirement — from the extractor. */
+  searchKeywords: string[]
   confidenceScore: number | null
   proposalSectionId: string | null
   proposalSectionTitle: string | null
