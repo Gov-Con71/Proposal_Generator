@@ -72,3 +72,23 @@ def test_missing_usage_metadata_is_safe(fake_redis):
     telemetry.record_response("gemini-2.0-flash", types.SimpleNamespace(), telemetry.now())
     snap = telemetry.metrics_snapshot()
     assert snap["by_model"]["gemini-2.0-flash"]["tokens_in"] == 0
+
+
+def test_cached_tokens_are_tracked_and_discounted(fake_redis):
+    """A provider that reports cached_content_token_count (prompt-prefix
+    caching) must have that reflected both in the raw counter and in a cheaper
+    cost estimate — otherwise /metrics overstates real spend once caching
+    kicks in (see draft_writer.format_*_block)."""
+    response = types.SimpleNamespace(
+        usage_metadata=types.SimpleNamespace(
+            prompt_token_count=1_000_000, candidates_token_count=0, cached_content_token_count=800_000
+        )
+    )
+    telemetry.record_response("gemini-2.0-flash", response, telemetry.now())
+
+    snap = telemetry.metrics_snapshot()
+    model = snap["by_model"]["gemini-2.0-flash"]
+    assert model["tokens_cached"] == 800_000
+    # 200k standard @ $0.10/1M + 800k cached @ $0.10/1M * 0.25 = 0.02 + 0.02 = $0.04
+    assert model["est_cost_usd"] == pytest.approx(0.04, abs=1e-6)
+    assert snap["totals"]["tokens_cached"] == 800_000

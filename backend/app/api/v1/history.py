@@ -1,9 +1,10 @@
 """Past-performance ingestion endpoints (Story 3.1; per-bid scope added Sprint 9).
 
-    POST   /history          → chunk + embed + store past-performance TEXT
-    POST   /history/upload   → same, from an uploaded PDF/DOCX/TXT document
-    GET    /history          → list ingested sources in one pool
-    DELETE /history/{source} → remove one source from one pool
+    POST   /history                  → chunk + embed + store past-performance TEXT
+    POST   /history/upload           → same, from an uploaded PDF/DOCX/TXT document
+    GET    /history                  → list ingested sources in one pool
+    POST   /history/{source}/promote → move one bid's source into the library
+    DELETE /history/{source}         → remove one source from one pool
 
 Every route takes an optional `proposalId`, which picks the evidence pool:
 
@@ -170,6 +171,30 @@ async def sources(
     pool = await _resolve_pool(proposal_id, user_id)
     rows = await asyncio.to_thread(history.list_sources, user_id, pool)
     return [HistorySource(**s) for s in rows]
+
+
+@router.post(
+    "/{source_name}/promote",
+    response_model=HistoryIngestResponse,
+    summary="Move one bid's supporting document into the long-term library",
+    dependencies=[Depends(require_writer)],
+)
+async def promote(
+    source_name: str,
+    proposal_id: UUID = Query(..., alias="proposalId"),
+    user_id: UUID = Depends(get_current_user_id),
+) -> HistoryIngestResponse:
+    """Re-pools an already-embedded source rather than re-ingesting it.
+
+    `proposalId` is required (not optional like the other routes): promoting
+    only makes sense *from* a bid's own pool — there is nowhere further for a
+    library document to be promoted to.
+    """
+    pool = await _resolve_pool(proposal_id, user_id)
+    count = await asyncio.to_thread(history.promote_to_library, user_id, source_name, pool)
+    if not count:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found.")
+    return HistoryIngestResponse(source_name=source_name, chunks=count)
 
 
 @router.delete(

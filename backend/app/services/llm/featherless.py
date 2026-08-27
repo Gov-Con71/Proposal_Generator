@@ -48,12 +48,19 @@ _JSON_INSTRUCTION = (
 
 
 def _usage_shim(data: dict):
-    """Adapts OpenAI-style `usage` to the shape telemetry.record_response reads."""
+    """Adapts OpenAI-style `usage` to the shape telemetry.record_response reads.
+
+    `prompt_tokens_details.cached_tokens` is the OpenAI-spec field for prompt-
+    cache hits; Featherless's open-weight backends may not populate it, in
+    which case this reads 0 (no visible caching), same as an absent field.
+    """
     u = data.get("usage") or {}
+    cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
     return SimpleNamespace(
         usage_metadata=SimpleNamespace(
             prompt_token_count=u.get("prompt_tokens", 0) or 0,
             candidates_token_count=u.get("completion_tokens", 0) or 0,
+            cached_content_token_count=cached,
         )
     )
 

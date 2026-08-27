@@ -38,7 +38,7 @@ def _clear_rate_limit_counters():
 def _clear_hyde_cache():
     """Drops cached HyDE narratives (`hyde:*`) around every test.
 
-    `_hyde_document` (draft_writer) caches by content hash of (section_title,
+    `_hyde_documents` (draft_writer) caches by content hash of (section_title,
     requirement_text) — several tests reuse the same title/text pair with
     different mocked LLM responses, and without this a later test can get a
     cache hit seeded by an earlier one instead of exercising its own mock.

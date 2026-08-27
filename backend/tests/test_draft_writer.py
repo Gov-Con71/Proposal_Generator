@@ -413,13 +413,18 @@ def test_retrieve_section_context_uses_the_hyde_document_as_the_query(monkeypatc
     the register gap against the narrative prose the corpus is written in."""
     import app.services.draft_writer as _dw
 
-    monkeypatch.setattr(
-        _dw,
-        "get_llm",
-        lambda tier="default": _FakeProvider(
-            "We delivered 412 depot overhauls on schedule under W91QUZ-19-C-0042."
-        ),
-    )
+    class _FakeStructuredProvider:
+        def generate_structured(self, prompt, schema, system=None):
+            return _dw._HydeBatch(
+                narratives=[
+                    _dw._HydeNarrative(
+                        index=0,
+                        narrative="We delivered 412 depot overhauls on schedule under W91QUZ-19-C-0042.",
+                    )
+                ]
+            )
+
+    monkeypatch.setattr(_dw, "get_llm", lambda tier="default": _FakeStructuredProvider())
 
     queries_seen: list[str] = []
 
@@ -440,7 +445,7 @@ def test_retrieve_section_context_uses_the_hyde_document_as_the_query(monkeypatc
     assert queries_seen == ["We delivered 412 depot overhauls on schedule under W91QUZ-19-C-0042."]
 
 
-def test_hyde_document_is_cached_across_calls(monkeypatch):
+def test_hyde_documents_are_cached_across_calls(monkeypatch):
     """A rate-limited retry loop must not regenerate — and re-spend quota on —
     the same hypothetical narrative every attempt; the second call for the same
     (section, requirement) pair should be a cache hit, not a second LLM call."""
@@ -449,32 +454,69 @@ def test_hyde_document_is_cached_across_calls(monkeypatch):
     calls = {"n": 0}
 
     class _CountingProvider:
-        def generate_text(self, prompt, system=None):
+        def generate_structured(self, prompt, schema, system=None):
             calls["n"] += 1
-            return "We delivered 412 depot overhauls under W91QUZ-19-C-0042."
+            return _dw._HydeBatch(
+                narratives=[
+                    _dw._HydeNarrative(
+                        index=0, narrative="We delivered 412 depot overhauls under W91QUZ-19-C-0042."
+                    )
+                ]
+            )
 
     monkeypatch.setattr(_dw, "get_llm", lambda tier="default": _CountingProvider())
 
-    first = _dw._hyde_document("Technical Approach", "The contractor SHALL deliver widgets.")
-    second = _dw._hyde_document("Technical Approach", "The contractor SHALL deliver widgets.")
+    first = _dw._hyde_documents("Technical Approach", ["The contractor SHALL deliver widgets."])
+    second = _dw._hyde_documents("Technical Approach", ["The contractor SHALL deliver widgets."])
 
-    assert first == second == "We delivered 412 depot overhauls under W91QUZ-19-C-0042."
-    assert calls["n"] == 1  # second call was a cache hit
+    assert first == second == ["We delivered 412 depot overhauls under W91QUZ-19-C-0042."]
+    assert calls["n"] == 1  # second call was entirely a cache hit — no batch request needed
 
 
-def test_hyde_document_cache_key_is_specific_to_the_pair(monkeypatch):
-    """A different requirement must not collide with another's cached narrative."""
+def test_hyde_documents_batch_maps_narratives_by_index(monkeypatch):
+    """Two different requirements answered by ONE batched call must not be
+    cross-assigned — each gets the narrative tagged with its own index, even
+    when the model returns them out of order."""
     import app.services.draft_writer as _dw
 
-    responses = iter(["narrative one", "narrative two"])
-    monkeypatch.setattr(
-        _dw, "get_llm", lambda tier="default": _FakeProvider(next(responses))
-    )
+    class _FakeStructuredProvider:
+        def generate_structured(self, prompt, schema, system=None):
+            return _dw._HydeBatch(
+                narratives=[
+                    _dw._HydeNarrative(index=1, narrative="narrative two"),
+                    _dw._HydeNarrative(index=0, narrative="narrative one"),
+                ]
+            )
 
-    first = _dw._hyde_document("Technical Approach", "Requirement A.")
-    second = _dw._hyde_document("Technical Approach", "Requirement B.")
+    monkeypatch.setattr(_dw, "get_llm", lambda tier="default": _FakeStructuredProvider())
 
-    assert (first, second) == ("narrative one", "narrative two")
+    results = _dw._hyde_documents("Technical Approach", ["Requirement A.", "Requirement B."])
+
+    assert results == ["narrative one", "narrative two"]
+
+
+def test_hyde_documents_only_batches_the_cache_misses(monkeypatch):
+    """A requirement already cached must not be re-sent in the batch request —
+    only the genuine misses go into the LLM call."""
+    import app.services.draft_writer as _dw
+
+    _dw.cache_set(_dw._hyde_cache_key("Technical Approach", "Requirement A."), "cached one", ttl=60)
+
+    prompts_seen: list[str] = []
+
+    class _FakeStructuredProvider:
+        def generate_structured(self, prompt, schema, system=None):
+            prompts_seen.append(prompt)
+            return _dw._HydeBatch(narratives=[_dw._HydeNarrative(index=1, narrative="fresh two")])
+
+    monkeypatch.setattr(_dw, "get_llm", lambda tier="default": _FakeStructuredProvider())
+
+    results = _dw._hyde_documents("Technical Approach", ["Requirement A.", "Requirement B."])
+
+    assert results == ["cached one", "fresh two"]
+    assert len(prompts_seen) == 1
+    assert "Requirement A." not in prompts_seen[0]
+    assert "Requirement B." in prompts_seen[0]
 
 
 def test_retrieve_section_context_falls_back_to_raw_text_when_hyde_fails(monkeypatch):
@@ -483,7 +525,7 @@ def test_retrieve_section_context_falls_back_to_raw_text_when_hyde_fails(monkeyp
     import app.services.draft_writer as _dw
 
     class _ExplodingProvider:
-        def generate_text(self, prompt, system=None):
+        def generate_structured(self, prompt, schema, system=None):
             raise RuntimeError("provider unavailable")
 
     monkeypatch.setattr(_dw, "get_llm", lambda tier="default": _ExplodingProvider())

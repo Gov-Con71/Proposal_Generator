@@ -46,6 +46,9 @@ from app.services.compliance_extractor import (
 )
 from app.services.draft_writer import (
     _format_company_profile,
+    format_company_block,
+    format_evidence_block,
+    format_solicitation_block,
     generate_section_draft,
     grounding_confidence,
     reference_tags,
@@ -106,7 +109,7 @@ _CRITIC_SYSTEM_PROMPT = (
     "4. filler_found — list any content-free corporate phrasing: unsubstantiated "
     "superlatives, boilerplate, or sentences that restate the requirement instead "
     "of answering it.\n"
-    "5. cited_sources — of the RETRIEVED EVIDENCE CHUNKS provided (each labeled "
+    "5. cited_sources — of the PAST-PERFORMANCE CONTEXT provided (each chunk labeled "
     "'[source_name — relevance N]'), list the exact source_name of every one whose "
     "content is actually reflected in a claim the draft makes. A chunk that was "
     "supplied but never drawn on does not belong in this list — only report a "
@@ -572,22 +575,19 @@ def _call_critic(
     the actual past-performance chunks the writer was handed (source + content) —
     without them the critic can only judge plausibility against the profile
     summary, not verify that a claim traces to a specific retrieved source.
+
+    The SOLICITATION CONTEXT / COMPANY PROFILE / PAST-PERFORMANCE CONTEXT blocks
+    are rendered by the exact same functions the writer's prompt uses
+    (`draft_writer.format_*_block`), so this call's prefix is byte-identical to
+    the draft call's — see those functions for why that matters for provider-
+    side prompt-prefix caching. Runs on the "light" tier: like HyDE, this is a
+    structured verification pass rather than the section's own prose, so it
+    doesn't need the main model's generation quality.
     """
     reqs = "\n".join(f"  {i + 1}. {t}" for i, t in enumerate(requirement_texts))
-    sol = f"SOLICITATION CONTEXT:\n{solicitation_context}\n\n" if solicitation_context else ""
-    company = f"COMPANY PROFILE (the only supportable facts):\n{company_context}\n\n" if company_context else ""
-    evidence = (
-        "RETRIEVED EVIDENCE CHUNKS (the only past-performance sources the writer "
-        "had access to):\n"
-        + "\n\n".join(
-            f"[{c.get('source_name', 'unknown')} — relevance {c.get('score', 0):.2f}]\n"
-            f"{c.get('content', '')}"
-            for c in citations
-        )
-        + "\n\n"
-        if citations
-        else ""
-    )
+    sol = format_solicitation_block(solicitation_context)
+    company = format_company_block(company_context)
+    evidence = format_evidence_block(citations or [])
     criteria = (
         "EVALUATION CRITERIA:\n"
         + "\n".join(f"  - {c}" for c in evaluation_criteria)
@@ -604,10 +604,10 @@ def _call_critic(
         f"{criteria}"
         f"DRAFT:\n{draft}\n\n"
         "Review the draft on all four dimensions. For each unsupported claim, say "
-        "whether it fails to match the COMPANY PROFILE, the RETRIEVED EVIDENCE "
-        "CHUNKS, or both — a claim consistent with either is supported."
+        "whether it fails to match the COMPANY PROFILE, the PAST-PERFORMANCE "
+        "CONTEXT, or both — a claim consistent with either is supported."
     )
-    return get_llm().generate_structured(
+    return get_llm(tier="light").generate_structured(
         prompt, ComplianceReview, system=_CRITIC_SYSTEM_PROMPT
     )
 
@@ -742,12 +742,30 @@ def _check_compliance_node(state: DraftingState) -> DraftingState:
 
 def _after_check(state: DraftingState) -> str:
     """Conditional edge: revise the section if the critic flagged gaps and budget
-    remains, otherwise save it. A stalled loop (the critic's findings didn't
-    change after a revision) saves immediately regardless of remaining budget —
-    another identical attempt isn't going to converge either."""
+    remains, otherwise save it. Two cases save immediately regardless of
+    remaining budget, because another attempt cannot do better:
+
+      * stalled — the critic's findings didn't change after a revision, so it
+        isn't converging.
+      * ungrounded — the retriever found no past-performance evidence for ANY
+        requirement in this section. The critic's complaint here is almost
+        always `unsupported_claims`, and rewriting the prose cannot supply
+        evidence retrieval never found; spending the revision budget only
+        regenerates the same unevidenced draft at 2x-3x the LLM cost.
+    """
     if state.get("stalled"):
         return "save"
-    if state["feedback"] and state["attempts"] < _MAX_ATTEMPTS:
+    if not state["feedback"]:
+        return "save"
+    if not state["section"].get("grounded"):
+        logger.info(
+            "drafting: section '%s' has no past-performance evidence at all — "
+            "saving with the critic's feedback as review_notes instead of "
+            "spending the revision budget on it.",
+            state["section"]["title"],
+        )
+        return "save"
+    if state["attempts"] < _MAX_ATTEMPTS:
         return "revise"
     return "save"
 

@@ -111,6 +111,49 @@ def test_deleting_the_proposal_removes_its_documents_only(tenant):
     assert _chunk_count(user_id, None) > 0, "the cascade took the library with it"
 
 
+def test_promote_moves_a_bids_document_into_the_library(tenant):
+    """Promotion re-pools the existing chunks; it must not touch other bids
+    or duplicate anything already in the library."""
+    user_id, proposal_id = tenant
+    history.store_history(user_id, "bid-doc", "Relevant to this bid, and worth keeping.", proposal_id)
+
+    moved = history.promote_to_library(user_id, "bid-doc", proposal_id)
+
+    assert moved > 0
+    assert history.list_sources(user_id, proposal_id) == [], "the source is still in the bid pool"
+    assert [s["source_name"] for s in history.list_sources(user_id)] == ["bid-doc"]
+
+
+def test_promote_is_scoped_to_the_named_bid(tenant):
+    """Promoting from one bid must not move a same-named document living in
+    another bid's pool."""
+    user_id, proposal_id = tenant
+    other = uuid.uuid4()
+    conn = _conn()
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO proposals (proposal_id, owned_by, title) VALUES (%s, %s, 'Other');",
+            (str(other), str(user_id)),
+        )
+    conn.close()
+
+    history.store_history(user_id, "shared-name", "Bid A's copy.", proposal_id)
+    history.store_history(user_id, "shared-name", "Bid B's copy.", other)
+
+    moved = history.promote_to_library(user_id, "shared-name", proposal_id)
+
+    assert moved > 0
+    assert history.list_sources(user_id, proposal_id) == []
+    assert [s["source_name"] for s in history.list_sources(user_id, other)] == ["shared-name"], (
+        "promoting bid A's document also moved bid B's"
+    )
+
+
+def test_promote_of_a_nonexistent_source_moves_nothing(tenant):
+    user_id, proposal_id = tenant
+    assert history.promote_to_library(user_id, "never-uploaded", proposal_id) == 0
+
+
 def test_deleting_a_source_is_scoped_to_its_pool(tenant):
     """The same filename in both pools is two documents, not one."""
     user_id, proposal_id = tenant

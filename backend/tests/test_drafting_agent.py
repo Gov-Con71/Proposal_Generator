@@ -396,6 +396,55 @@ def test_critic_receives_the_writer_evidence_chunks(seeded_rfp, monkeypatch):
     assert critic_calls[0]["citations"] == citations
 
 
+def test_critic_prompt_shares_the_writers_prefix_and_runs_on_the_light_tier(monkeypatch):
+    """Unit test of `_call_critic` itself (not the graph): its SOLICITATION
+    CONTEXT + COMPANY PROFILE + PAST-PERFORMANCE CONTEXT blocks must be
+    byte-identical to what the writer's prompt would produce for the same
+    inputs — a provider's prompt-prefix caching (Gemini implicit caching,
+    Vertex explicit caching) can only share a cache between the draft and
+    critic calls of one round if their prefixes match exactly. The critic also
+    runs on the "light" tier: it's a structured verification pass, not the
+    section's own prose, so it doesn't need the main model's quality."""
+    from app.services import draft_writer
+
+    sol = "- Agency: US Army\n- Opportunity: Widget Depot Overhaul"
+    company = "- Legal name: Acme Federal LLC\n- CAGE code: 7X9Q2"
+    citations = [{"source_name": "past.pdf", "score": 0.81, "content": "412 depot overhauls."}]
+
+    expected_prefix = (
+        draft_writer.format_solicitation_block(sol)
+        + draft_writer.format_company_block(company)
+        + draft_writer.format_evidence_block(citations)
+    )
+
+    captured: dict = {}
+
+    class _CapturingProvider:
+        def generate_structured(self, prompt, schema, system=None):
+            captured["prompt"] = prompt
+            return ComplianceReview(
+                benefit_mapped=True, addressed=True, evaluation_alignment=True, feedback=""
+            )
+
+    def fake_get_llm(tier="default"):
+        captured["tier"] = tier
+        return _CapturingProvider()
+
+    monkeypatch.setattr(drafting_agent, "get_llm", fake_get_llm)
+
+    drafting_agent._call_critic(
+        "Technical Approach",
+        ["The contractor SHALL deliver widgets."],
+        "Draft body.",
+        solicitation_context=sol,
+        company_context=company,
+        citations=citations,
+    )
+
+    assert captured["tier"] == "light"
+    assert captured["prompt"].startswith(expected_prefix)
+
+
 def test_unused_evidence_is_flagged_when_the_critic_reports_it(seeded_rfp, monkeypatch):
     """Retrieval can hand the writer evidence it never actually leans on. When
     the critic explicitly names which sources the draft *does* reflect, the
@@ -961,6 +1010,41 @@ def test_ungrounded_section_is_flagged_for_review(seeded_rfp, monkeypatch):
 
     notes = _fetch_sections(proposal_id)[0]["review_notes"]
     assert notes and "past-performance" in notes
+
+
+def test_ungrounded_section_skips_the_revision_budget(seeded_rfp, monkeypatch):
+    """A section with no past-performance evidence at all can't be fixed by
+    rewriting — the critic's `unsupported_claims` complaint has no evidence to
+    resolve it with, so a revision would just regenerate the same unevidenced
+    draft. Saves on attempt 1 with the critic's feedback as review_notes,
+    instead of spending the full revision budget on it."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt):
+        return ProposalOutline(sections=[_planned("Technical Approach", [0], "t")])
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(
+        drafting_agent,
+        "_call_critic",
+        lambda *a, **kw: ComplianceReview(
+            benefit_mapped=True,
+            addressed=False,
+            evaluation_alignment=True,
+            unsupported_claims=["12 years of depot-level pump overhauls"],
+            feedback="Ground this claim.",
+        ),
+    )
+    fake_section_draft, draft_calls = _fake_draft("Draft v{n}.", grounded=False)
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
+
+    drafting_agent.run_drafting_sync(proposal_id)
+
+    # Exactly one attempt — the ungrounded early-out saved before ever revising.
+    assert len(draft_calls) == 1
+    sections = _fetch_sections(proposal_id)
+    assert sections[0]["status"] == "needs_review"
+    assert "Ground this claim." in sections[0]["review_notes"]
 
 
 def test_partially_grounded_section_is_flagged_for_review(seeded_rfp, monkeypatch):

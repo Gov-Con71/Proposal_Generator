@@ -11,6 +11,8 @@ import logging
 from typing import Optional
 from uuid import UUID
 
+from pydantic import BaseModel, Field
+
 from app.core.cache import cache_get, cache_set
 from app.services.guardrails import validate_draft
 from app.services.llm import get_llm
@@ -162,6 +164,38 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit].rstrip() + " …[truncated]"
 
 
+# These three render the blocks shared, byte-for-byte, with the compliance
+# critic's prompt (`drafting_agent._call_critic`) — same content, same header
+# text, same truncation. A draft call and its critic call see the identical
+# SOLICITATION CONTEXT + COMPANY PROFILE + PAST-PERFORMANCE CONTEXT text (only
+# what follows differs), which is the shape a provider's prompt-prefix caching
+# (Gemini's automatic caching, Vertex explicit caching) needs to ever apply —
+# formatting the same content two different ways would make every call pay
+# full price for identical bytes.
+def format_solicitation_block(solicitation_context: str | None) -> str:
+    return (
+        f"SOLICITATION CONTEXT:\n{_truncate(solicitation_context, _MAX_SOLICITATION_CHARS)}\n\n"
+        if solicitation_context
+        else ""
+    )
+
+
+def format_company_block(company_context: str | None) -> str:
+    return f"COMPANY PROFILE:\n{company_context}\n\n" if company_context else ""
+
+
+def format_evidence_block(context: list[dict]) -> str:
+    if context:
+        blocks = "\n\n".join(
+            f"[{c['source_name']} — relevance {c['score']:.2f}]\n"
+            f"{_truncate(c['content'], _MAX_CHUNK_CHARS)}"
+            for c in context
+        )
+    else:
+        blocks = "(no matching past-performance context found)"
+    return f"PAST-PERFORMANCE CONTEXT:\n{blocks}\n\n"
+
+
 def _assemble_section_prompt(
     section_title: str,
     requirement_texts: list[str],
@@ -174,23 +208,11 @@ def _assemble_section_prompt(
     target_words: int | None = None,
 ) -> str:
     reqs = "\n".join(f"  {i + 1}. {t}" for i, t in enumerate(requirement_texts))
-    if context:
-        blocks = "\n\n".join(
-            f"[{c['source_name']} — relevance {c['score']:.2f}]\n"
-            f"{_truncate(c['content'], _MAX_CHUNK_CHARS)}"
-            for c in context
-        )
-    else:
-        blocks = "(no matching past-performance context found)"
     # Document-level framing from the solicitation summary (agency, objective, …),
     # so the section reads as a response to this specific opportunity.
-    sol = (
-        f"SOLICITATION CONTEXT:\n{_truncate(solicitation_context, _MAX_SOLICITATION_CHARS)}\n\n"
-        if solicitation_context
-        else ""
-    )
+    sol = format_solicitation_block(solicitation_context)
     # The offeror's own verifiable facts — the source of every evidence-backed claim.
-    company = f"COMPANY PROFILE:\n{company_context}\n\n" if company_context else ""
+    company = format_company_block(company_context)
     # Section M: what this section is actually scored on.
     evaluation = (
         "EVALUATION CRITERIA THIS SECTION IS SCORED ON:\n"
@@ -233,7 +255,7 @@ def _assemble_section_prompt(
     prompt = (
         f"{sol}"
         f"{company}"
-        f"PAST-PERFORMANCE CONTEXT:\n{blocks}\n\n"
+        f"{format_evidence_block(context)}"
         f"{themes}"
         f"PROPOSAL SECTION: {section_title}\n\n"
         f"{evaluation}"
@@ -274,15 +296,25 @@ _FALLBACK_CONTEXT_SCORE = 0.20
 # was (5 "matches" turning out to be 5 adjacent chunks of one past proposal).
 _MAX_CHUNKS_PER_SOURCE = 2
 
-_HYDE_SYSTEM_PROMPT = (
-    "You write a single short, plausible excerpt from a government contractor's "
+_HYDE_BATCH_SYSTEM_PROMPT = (
+    "You write a short, plausible excerpt from a government contractor's "
     "past-performance narrative — the kind of prose that appears in a proposal's "
-    "prior-contract write-up — that would satisfy the requirement below if it "
-    "were true of the offeror's history. 2-3 sentences, concrete and specific "
-    "(as if naming a real contract, metric, or outcome). Do not hedge, caveat, "
-    "or address the reader; write only the narrative prose itself, as though "
-    "quoting a real past-performance summary."
+    "prior-contract write-up — for EACH numbered requirement below, as if it "
+    "were true of the offeror's history. One narrative per requirement: 2-3 "
+    "sentences, concrete and specific (as if naming a real contract, metric, or "
+    "outcome). Do not hedge, caveat, or address the reader; write only the "
+    "narrative prose itself, as though quoting a real past-performance summary. "
+    "Tag each narrative with the exact index of the requirement it answers."
 )
+
+
+class _HydeNarrative(BaseModel):
+    index: int = Field(description="The requirement's index from the numbered list, matching exactly.")
+    narrative: str = Field(description="The 2-3 sentence hypothetical past-performance excerpt.")
+
+
+class _HydeBatch(BaseModel):
+    narratives: list[_HydeNarrative]
 
 
 # The hypothetical narrative is a pure function of (section_title,
@@ -299,43 +331,65 @@ def _hyde_cache_key(section_title: str, requirement_text: str) -> str:
     return f"hyde:{digest[:24]}"
 
 
-def _hyde_document(section_title: str, requirement_text: str) -> str | None:
-    """A short hypothetical past-performance narrative answering `requirement_text`.
+def _hyde_documents(section_title: str, requirement_texts: list[str]) -> list[Optional[str]]:
+    """Hypothetical past-performance narratives for every requirement in a
+    section — one LLM call for the whole section instead of one per requirement.
 
     HyDE (Hypothetical Document Embeddings): the retrieval corpus is narrative
     prose ("delivered 412 depot overhauls under W91QUZ-19-C-0042"); the query is
     imperative/regulatory ("The contractor SHALL..."). Embedding the raw
     requirement against that corpus is a register mismatch that can silently
     drop genuinely relevant chunks phrased differently — embedding a
-    *hypothetical* narrative answer instead closes that gap. Returns None (the
-    caller falls back to the raw-text query) on any generation failure:
-    retrieval must never be blocked by this being an extra LLM call.
+    *hypothetical* narrative answer instead closes that gap.
 
-    Cached (see `_HYDE_CACHE_TTL_SECONDS`) and run on the "light" model tier
-    (LLM_MODEL_LIGHT, falls back to the main model if unset): this call doesn't
-    need the main model's quality, and a rate-limited retry loop on the
-    drafting call would otherwise regenerate the same narrative every attempt,
-    burning quota that was better spent on the draft itself.
+    Batched because the narratives are independent of each other: a section
+    with 5 requirements used to cost 5 separate round trips for no quality
+    benefit, which is 5x the request-count pressure against a per-day/per-
+    minute provider quota. Caching stays per-(section, requirement) — see
+    `_hyde_cache_key` — so only the genuine cache misses go into the (single)
+    batch request; a retry, or a requirement shared across proposals, still
+    reuses whatever is already cached.
+
+    Run on the "light" model tier (LLM_MODEL_LIGHT, falls back to the main
+    model if unset): this doesn't need the main model's quality, and a rate-
+    limited retry loop on the drafting call would otherwise regenerate the same
+    narratives every attempt, burning quota better spent on the draft itself.
+
+    Returns one entry per `requirement_texts`, in the same order; None where no
+    narrative could be produced (a cache miss the batch call also failed to
+    fill) — callers fall back to the raw requirement text as the retrieval
+    query, same as before this was batched.
     """
-    key = _hyde_cache_key(section_title, requirement_text)
-    cached = cache_get(key)
-    if cached is not None:
-        return cached
+    keys = [_hyde_cache_key(section_title, req) for req in requirement_texts]
+    results: list[Optional[str]] = [cache_get(k) for k in keys]
+    misses = [i for i, r in enumerate(results) if r is None]
+    if not misses:
+        return results
+
+    listing = "\n".join(f"[{i}] {requirement_texts[i]}" for i in misses)
     try:
-        text = get_llm(tier="light").generate_text(
-            f"SECTION: {section_title}\nREQUIREMENT: {requirement_text}",
-            system=_HYDE_SYSTEM_PROMPT,
+        batch = get_llm(tier="light").generate_structured(
+            f"SECTION: {section_title}\nREQUIREMENTS:\n{listing}",
+            _HydeBatch,
+            system=_HYDE_BATCH_SYSTEM_PROMPT,
         )
-        cache_set(key, text, ttl=_HYDE_CACHE_TTL_SECONDS)
-        return text
+        by_index = {n.index: n.narrative for n in batch.narratives}
     except Exception:
         logger.warning(
-            "_hyde_document: generation failed for '%s' — falling back to the "
-            "raw requirement text as the retrieval query.",
+            "_hyde_documents: batch generation failed for '%s' (%d requirement(s)) "
+            "— falling back to the raw requirement text for each.",
             section_title,
+            len(misses),
             exc_info=True,
         )
-        return None
+        by_index = {}
+
+    for i in misses:
+        narrative = by_index.get(i)
+        if narrative:
+            cache_set(keys[i], narrative, ttl=_HYDE_CACHE_TTL_SECONDS)
+        results[i] = narrative
+    return results
 
 
 def _diversify(hits: list[dict], top_k: int) -> list[dict]:
@@ -400,8 +454,12 @@ def _retrieve_section_context(
     seen: dict[str, dict] = {}
     grounded_count = 0
     weak = False
-    for req in requirement_texts:
-        hyde = _hyde_document(section_title, req) if use_hyde else None
+    hydes = (
+        _hyde_documents(section_title, requirement_texts)
+        if use_hyde
+        else [None] * len(requirement_texts)
+    )
+    for req, hyde in zip(requirement_texts, hydes):
         query = hyde or f"{section_title}\n{req}"
         hits = search_similar(
             uploaded_by,

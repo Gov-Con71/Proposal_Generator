@@ -420,3 +420,23 @@ export function useHistoryRemove(proposalId?: string) {
     },
   })
 }
+
+/** Moves one of THIS bid's supporting documents into the long-term library.
+ *  `proposalId` optional only to mirror the sibling hooks' signature — the
+ *  library page never renders the button that would call this, so the
+ *  missing-id throw is unreachable in practice, not a real runtime path.
+ *  Invalidates both caches: the source disappears from the bid's list and
+ *  (if it's ever been fetched) reappears in the library's. */
+export function useHistoryPromote(proposalId?: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (sourceName: string) => {
+      if (!proposalId) throw new Error('useHistoryPromote requires a proposalId')
+      return historyApi.promote(sourceName, proposalId)
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['history', proposalId ?? 'library'] })
+      qc.invalidateQueries({ queryKey: ['history', 'library'] })
+    },
+  })
+}

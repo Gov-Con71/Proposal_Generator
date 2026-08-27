@@ -279,6 +279,18 @@ export const historyApi = {
         params: proposalId ? { proposalId } : undefined,
       })
       .then((r) => r.data),
+
+  // Moves a bid's supporting document into the long-term library — re-pools
+  // the already-embedded chunks server-side rather than re-uploading.
+  // proposalId is required: there's nowhere further to promote a library doc to.
+  promote: (sourceName: string, proposalId: string) =>
+    apiClient
+      .post<HistoryIngestResult>(
+        `/history/${encodeURIComponent(sourceName)}/promote`,
+        undefined,
+        { params: { proposalId } },
+      )
+      .then((r) => r.data),
 }
 
 // ─── compliance.ts ────────────────────────────────────────────────────────────

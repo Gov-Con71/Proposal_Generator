@@ -1,12 +1,12 @@
 'use client'
 import { useCallback, useState } from 'react'
 import { useDropzone, type FileRejection } from 'react-dropzone'
-import { CloudUpload, FileText, Loader2, Trash2, AlertTriangle } from 'lucide-react'
+import { CloudUpload, FileText, Loader2, Trash2, AlertTriangle, Library } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { EmptyState, ErrorState, errorMessage } from '@/components/ui/state'
 import { cn } from '@/lib/utils/cn'
 import { formatDate } from '@/lib/utils/format'
-import { useHistorySources, useHistoryUpload, useHistoryRemove } from '@/lib/hooks'
+import { useHistorySources, useHistoryUpload, useHistoryRemove, useHistoryPromote } from '@/lib/hooks'
 
 const MAX_SIZE = 50 * 1024 * 1024
 
@@ -28,6 +28,7 @@ export function EvidenceUploader({ proposalId, emptyTitle, emptyMessage }: Evide
   const { data: sources = [], isLoading, isError, error, refetch } = useHistorySources(proposalId)
   const upload = useHistoryUpload(proposalId)
   const remove = useHistoryRemove(proposalId)
+  const promote = useHistoryPromote(proposalId)
   const [rejected, setRejected] = useState<string | null>(null)
 
   // Uploads run one at a time. Each costs a parse plus an embedding call, and
@@ -117,6 +118,13 @@ export function EvidenceUploader({ proposalId, emptyTitle, emptyMessage }: Evide
             <span className="text-xs text-danger-800">{errorMessage(upload.error)}</span>
           </div>
         )}
+
+        {promote.isError && (
+          <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded bg-danger-50">
+            <AlertTriangle className="w-3.5 h-3.5 text-danger-600 shrink-0" />
+            <span className="text-xs text-danger-800">{errorMessage(promote.error)}</span>
+          </div>
+        )}
       </Card>
 
       <Card>
@@ -157,6 +165,23 @@ export function EvidenceUploader({ proposalId, emptyTitle, emptyMessage }: Evide
                     {s.chunks} passage{s.chunks === 1 ? '' : 's'} · {formatDate(s.createdAt)}
                   </span>
                 </div>
+                {/* Only the bid pool can promote — the library page has
+                    nowhere further to send a document. */}
+                {proposalId && (
+                  <button
+                    onClick={() => promote.mutate(s.sourceName)}
+                    disabled={promote.isPending}
+                    title="Save to your permanent library"
+                    aria-label={`Save ${s.sourceName} to library`}
+                    className="w-8 h-8 flex items-center justify-center rounded text-[var(--text-tertiary)] hover:text-primary-600 hover:bg-primary-50 transition-colors disabled:opacity-50"
+                  >
+                    {promote.isPending && promote.variables === s.sourceName ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Library className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                )}
                 <button
                   onClick={() => remove.mutate(s.sourceName)}
                   disabled={remove.isPending}

@@ -129,6 +129,34 @@ def delete_source(uploaded_by: UUID, source_name: str, proposal_id: Optional[UUI
     return deleted
 
 
+def promote_to_library(uploaded_by: UUID, source_name: str, proposal_id: UUID) -> int:
+    """Moves one bid's supporting document into the tenant's long-term library.
+
+    Just re-pools the existing rows (`proposal_id` -> NULL) rather than
+    re-parsing/re-embedding the source — the chunks and their vectors are
+    already correct, only which pool they belong to changes. Returns chunks
+    moved, so a caller can treat 0 as "not found in that bid".
+    """
+    conn = get_connection()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE historical_chunks SET proposal_id = NULL "
+                "WHERE uploaded_by = %s AND source_name = %s AND proposal_id = %s;",
+                (str(uploaded_by), source_name, str(proposal_id)),
+            )
+            moved = cur.rowcount
+    finally:
+        conn.close()
+    logger.info(
+        "promote_to_library: moved %d chunk(s) of '%s' from proposal %s to the library",
+        moved,
+        source_name,
+        proposal_id,
+    )
+    return moved
+
+
 def list_sources(uploaded_by: UUID, proposal_id: Optional[UUID] = None) -> list[dict]:
     """Returns each distinct source with its chunk count and tags, for ONE pool.
 
