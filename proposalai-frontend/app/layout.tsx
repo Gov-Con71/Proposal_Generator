@@ -1,5 +1,5 @@
 import type { Metadata } from 'next'
-import { Inter, JetBrains_Mono } from 'next/font/google'
+import { Inter, JetBrains_Mono, Newsreader } from 'next/font/google'
 import { Toaster } from 'react-hot-toast'
 import { Providers } from './providers'
 import './globals.css'
@@ -16,6 +16,17 @@ const jetbrainsMono = JetBrains_Mono({
   display: 'swap',
 })
 
+// Display serif, used only by the public landing page. A serif reads as
+// "document" where Inter reads as "software", which is the whole point on a
+// page selling federal proposal tooling. Self-hosted by next/font, so no
+// render-blocking request to Google.
+const newsreader = Newsreader({
+  subsets: ['latin'],
+  variable: '--font-display',
+  display: 'swap',
+  weight: ['400', '500', '600'],
+})
+
 export const metadata: Metadata = {
   title: { default: 'ProposalAI', template: '%s — ProposalAI' },
   description: 'Government proposal generation platform',
@@ -24,7 +35,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
+    <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable} ${newsreader.variable}`}>
       <body>
         <Providers>{children}</Providers>
         <Toaster

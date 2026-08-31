@@ -3,10 +3,18 @@ import type { NextRequest } from 'next/server'
 
 const PUBLIC_ROUTES = ['/login', '/request-access']
 
+// The marketing landing page. Matched EXACTLY, never by prefix: '/' is a prefix
+// of every path on the site, so adding it to PUBLIC_ROUTES above would make
+// `startsWith` return true for everything and silently disable the guard.
+const PUBLIC_EXACT = ['/']
+
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
 
   // Allow public routes through
+  if (PUBLIC_EXACT.includes(pathname)) {
+    return NextResponse.next()
+  }
   if (PUBLIC_ROUTES.some((route) => pathname.startsWith(route))) {
     return NextResponse.next()
   }
