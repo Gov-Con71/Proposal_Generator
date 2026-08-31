@@ -30,6 +30,27 @@ def _conn():
     return psycopg2.connect(settings.database_url)
 
 
+@pytest.fixture(autouse=True)
+def stub_embeddings(monkeypatch):
+    """Deterministic 768-dim vectors instead of a live provider call.
+
+    `store_history` embeds every chunk it writes, so without this each test
+    here would make a real network request — passing for whoever happens to
+    hold a valid API key and failing in CI, which holds none. These tests are
+    about which POOL a chunk lands in and which pool a query reads, which is
+    SQL; the embedding is incidental to all of it. The vectors still have to be
+    the right width, because the column is vector(768) and a wrong one would
+    fail the insert rather than the assertion.
+    """
+    from app.services import embeddings, history_service
+
+    monkeypatch.setattr(
+        history_service,
+        "embed_texts",
+        lambda texts: [[0.001 * (i + 1)] * embeddings.EMBED_DIM for i, _ in enumerate(texts)],
+    )
+
+
 @pytest.fixture
 def tenant():
     """A user plus one proposal of theirs. Both removed afterwards."""
