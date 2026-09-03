@@ -174,6 +174,14 @@ class Settings(BaseSettings):
     register_window_seconds: int = Field(
         default=3600, validation_alias="REGISTER_WINDOW_SECONDS"
     )
+    # A 6-digit TOTP code is only 1,000,000 possibilities — small enough to
+    # brute-force without a strict per-account limit, unlike a password.
+    totp_max_failures_per_account: int = Field(
+        default=8, validation_alias="TOTP_MAX_FAILURES_PER_ACCOUNT"
+    )
+    totp_failure_window_seconds: int = Field(
+        default=900, validation_alias="TOTP_FAILURE_WINDOW_SECONDS"
+    )  # 15 minutes
 
     # --- Celery / Redis worker queue (Story 2.5) ---
     celery_broker_url: str = Field(

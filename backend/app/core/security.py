@@ -37,6 +37,33 @@ def create_access_token(subject: str) -> tuple[str, datetime]:
     return token, expire
 
 
+def create_two_factor_challenge_token(subject: str) -> str:
+    """Signs a short-lived JWT proving `subject`'s password already checked out.
+
+    Issued by `/auth/login` when the account has 2FA enabled, in place of a
+    session. Five minutes is long enough to type a 6-digit code and short
+    enough that a token intercepted in transit is useless soon after.
+    """
+    expire = datetime.now(timezone.utc) + timedelta(minutes=5)
+    payload = {"sub": subject, "exp": expire, "type": "2fa_challenge"}
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def decode_two_factor_challenge_token(token: str) -> str:
+    """Returns the subject (user id) from a valid 2FA challenge token.
+
+    Raises jwt exceptions on a bad/expired token, and ValueError if handed a
+    token of any other type — an access or refresh token must not double as
+    proof the password step already passed.
+    """
+    payload = jwt.decode(
+        token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
+    )
+    if payload.get("type") != "2fa_challenge":
+        raise ValueError("Not a 2FA challenge token.")
+    return payload["sub"]
+
+
 def decode_token(token: str) -> str:
     """Returns the subject (user id) from a valid access token.
 
