@@ -21,15 +21,11 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_APP_VERSION: '0.1.0',
   },
 
-  async redirects() {
-    return [
-      {
-        source: '/',
-        destination: '/dashboard',
-        permanent: false,
-      },
-    ]
-  },
+  // No redirect off '/' any more: it serves the public marketing landing page.
+  // A config-level redirect here would win before routing ever reached
+  // app/page.tsx, so the page would be unreachable no matter what it contained.
+  // Signed-in users reach the app through the header, and the proxy sends
+  // anyone hitting a guarded route to /login with a ?from= to return to.
 
   async headers() {
     return [
