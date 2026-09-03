@@ -86,6 +86,7 @@ class User(CamelModel):
     company_id: str
     avatar_url: Optional[str] = None
     created_at: str
+    totp_enabled: bool = False
 
 
 class Session(CamelModel):
@@ -95,6 +96,44 @@ class Session(CamelModel):
     # can read it (GAP_ANALYSIS §2.5). Putting it here would hand it straight
     # back to the JavaScript the cookie exists to hide it from.
     expires_at: str
+
+
+class ActiveSession(CamelModel):
+    id: str
+    user_agent: Optional[str] = None
+    ip_address: Optional[str] = None
+    created_at: str
+    is_current: bool
+
+
+# ---------------------------------------------------------------------------
+# Two-factor authentication (TOTP)
+# ---------------------------------------------------------------------------
+
+class TwoFactorChallenge(CamelModel):
+    """Returned by /auth/login in place of a Session when the account has 2FA
+    enabled — the password checked out, but the session isn't open yet."""
+
+    requires_two_factor: Literal[True] = True
+    challenge_token: str
+
+
+class TwoFactorLoginRequest(CamelModel):
+    challenge_token: str
+    code: str
+
+
+class TwoFactorSetupResponse(CamelModel):
+    secret: str
+    otpauth_url: str
+
+
+class TwoFactorVerifyRequest(CamelModel):
+    code: str
+
+
+class TwoFactorDisableRequest(CamelModel):
+    password: str
 
 
 class MessageResponse(CamelModel):

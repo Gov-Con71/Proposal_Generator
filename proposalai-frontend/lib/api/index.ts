@@ -1,6 +1,6 @@
 // ─── auth.ts ─────────────────────────────────────────────────────────────────
 import apiClient from './client'
-import type { Session, User } from '@/types'
+import type { ActiveSession, Session, TwoFactorChallenge, TwoFactorSetup, User } from '@/types'
 
 export interface RegisterPayload {
   email: string
@@ -12,8 +12,19 @@ export interface RegisterPayload {
 }
 
 export const authApi = {
+  /** Either opens a session directly, or — if the account has 2FA enabled —
+   * returns a challenge token for `completeTwoFactorLogin`. */
   login: (email: string, password: string) =>
-    apiClient.post<Session>('/auth/login', { email, password }).then((r) => r.data),
+    apiClient
+      .post<Session | TwoFactorChallenge>('/auth/login', { email, password })
+      .then((r) => r.data),
+
+  /** Finishes a 2FA-gated login: the challenge token from `login` plus the
+   * 6-digit code from the authenticator app. */
+  completeTwoFactorLogin: (challengeToken: string, code: string) =>
+    apiClient
+      .post<Session>('/auth/2fa/login', { challengeToken, code })
+      .then((r) => r.data),
 
   register: (data: RegisterPayload) =>
     apiClient.post<Session>('/auth/register', data).then((r) => r.data),
@@ -37,6 +48,24 @@ export const authApi = {
     apiClient
       .post<{ message: string }>('/auth/password', { currentPassword, newPassword })
       .then((r) => r.data),
+
+  /** Every device with a live refresh token, for the Security page. */
+  getSessions: () =>
+    apiClient.get<ActiveSession[]>('/auth/sessions').then((r) => r.data),
+
+  /** Starts 2FA enrollment: a new secret plus an otpauth:// URI to render as
+   * a QR code. Not enabled until `verifyTwoFactor` confirms a code. */
+  setupTwoFactor: () =>
+    apiClient.post<TwoFactorSetup>('/auth/2fa/setup').then((r) => r.data),
+
+  /** Confirms enrollment with a code from the authenticator app and turns
+   * 2FA on. */
+  verifyTwoFactor: (code: string) =>
+    apiClient.post<{ message: string }>('/auth/2fa/verify', { code }).then((r) => r.data),
+
+  /** Disables 2FA. Requires the account password, not just the bearer token. */
+  disableTwoFactor: (password: string) =>
+    apiClient.post<{ message: string }>('/auth/2fa/disable', { password }).then((r) => r.data),
 }
 
 // ─── proposals.ts ────────────────────────────────────────────────────────────

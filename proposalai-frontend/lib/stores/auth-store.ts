@@ -31,6 +31,9 @@ interface AuthState {
   setSession: (session: Session) => void
   clearSession: () => void
   setReady: () => void
+  /** Patches the signed-in user in place — e.g. reflecting a 2FA toggle —
+   * without a full session refresh. No-ops if nobody is signed in. */
+  updateUser: (patch: Partial<User>) => void
 }
 
 /**
@@ -52,7 +55,7 @@ function setMarker(present: boolean) {
     : `${MARKER}=; path=/; max-age=0; SameSite=Lax`
 }
 
-export const useAuthStore = create<AuthState>()((set) => ({
+export const useAuthStore = create<AuthState>()((set, get) => ({
   user: null,
   accessToken: null,
   isAuthenticated: false,
@@ -79,4 +82,9 @@ export const useAuthStore = create<AuthState>()((set) => ({
   },
 
   setReady: () => set({ isReady: true }),
+
+  updateUser: (patch) => {
+    const { user } = get()
+    if (user) set({ user: { ...user, ...patch } })
+  },
 }))

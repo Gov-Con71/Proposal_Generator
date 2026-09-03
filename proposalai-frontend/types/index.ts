@@ -7,6 +7,7 @@ export interface User {
   companyId: string
   avatarUrl?: string
   createdAt: string
+  totpEnabled: boolean
 }
 
 export interface Session {
@@ -17,6 +18,26 @@ export interface Session {
   // which is the whole point — a token in this object is a token in the heap,
   // reachable by anything running on the page (GAP_ANALYSIS §2.5).
   expiresAt: string
+}
+
+/** Returned by POST /auth/login instead of a Session when the account has 2FA
+ * enabled — the password checked out, but the session isn't open yet. */
+export interface TwoFactorChallenge {
+  requiresTwoFactor: true
+  challengeToken: string
+}
+
+export interface TwoFactorSetup {
+  secret: string
+  otpauthUrl: string
+}
+
+export interface ActiveSession {
+  id: string
+  userAgent: string | null
+  ipAddress: string | null
+  createdAt: string
+  isCurrent: boolean
 }
 
 // ─── profile.ts ──────────────────────────────────────────────────────────────

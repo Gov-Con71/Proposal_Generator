@@ -32,11 +32,12 @@ def _row_to_user(row: dict) -> dict:
         "company_id": str(row["company_id"]) if row.get("company_id") else "",
         "avatar_url": None,
         "created_at": row["created_at"].isoformat() if row.get("created_at") else "",
+        "totp_enabled": bool(row.get("totp_enabled", False)),
     }
 
 
 _USER_COLS = (
-    "user_id, email, first_name, last_name, role, company_id, created_at"
+    "user_id, email, first_name, last_name, role, company_id, created_at, totp_enabled"
 )
 
 
@@ -158,6 +159,30 @@ def change_password(user_id: UUID, current: str, new: str) -> None:
     finally:
         conn.close()
     logger.info("Password changed for user %s", user_id)
+
+
+def verify_password_for(user_id: UUID, password: str) -> None:
+    """Raises InvalidCredentialsError unless `password` matches the account.
+
+    Used to gate disabling 2FA on an already-authenticated request: an access
+    token alone (bearer, 15-minute-lived, and the only thing an XSS or a
+    shoulder-surfed unattended tab would hand an attacker) should not be
+    enough to turn off the second factor protecting the account.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT password_hash, is_active FROM users WHERE user_id = %s;",
+                (str(user_id),),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None or not row.get("is_active", True):
+        raise InvalidCredentialsError(str(user_id))
+    if not verify_password(password, row["password_hash"]):
+        raise InvalidCredentialsError(str(user_id))
 
 
 def set_active(user_id: UUID, is_active: bool) -> dict:

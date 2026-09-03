@@ -13,6 +13,11 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  // Set once the password step succeeds on a 2FA-enabled account. Its
+  // presence is what switches the form to the code-entry step below.
+  const [challengeToken, setChallengeToken] = useState<string | null>(null)
+  const [code, setCode] = useState('')
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError('')
@@ -22,15 +27,41 @@ export default function LoginPage() {
     }
     setLoading(true)
     try {
-      const session = await authApi.login(email, password)
+      const result = await authApi.login(email, password)
+      if ('requiresTwoFactor' in result) {
+        setChallengeToken(result.challengeToken)
+        setLoading(false)
+        return
+      }
       // setSession also sets the route-guard marker cookie. The session's
       // real credential is the HttpOnly cookie the server just set, which
       // this code deliberately cannot read.
-      setSession(session)
+      setSession(result)
       router.push('/dashboard')
     } catch (err) {
       const status = (err as { response?: { status?: number } }).response?.status
       setError(status === 401 ? 'Incorrect email or password.' : 'Sign in failed. Please try again.')
+      setLoading(false)
+    }
+  }
+
+  async function handleCodeSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setError('')
+    if (!challengeToken || code.length !== 6) return
+    setLoading(true)
+    try {
+      const session = await authApi.completeTwoFactorLogin(challengeToken, code)
+      setSession(session)
+      router.push('/dashboard')
+    } catch (err) {
+      const status = (err as { response?: { status?: number } }).response?.status
+      setError(
+        status === 401
+          ? 'Incorrect code. Check your authenticator app and try again.'
+          : 'Sign in failed. Please try again.'
+      )
+      setCode('')
       setLoading(false)
     }
   }
@@ -69,9 +100,13 @@ export default function LoginPage() {
           <span style={{ fontSize: '15px', fontWeight: '500', color: '#1C1C1A' }}>ProposalAI</span>
         </div>
 
-        <h1 style={{ fontSize: '18px', fontWeight: '500', color: '#1C1C1A', marginBottom: '4px' }}>Sign in</h1>
+        <h1 style={{ fontSize: '18px', fontWeight: '500', color: '#1C1C1A', marginBottom: '4px' }}>
+          {challengeToken ? 'Enter your code' : 'Sign in'}
+        </h1>
         <p style={{ fontSize: '12px', color: '#888780', marginBottom: '24px' }}>
-          Government Proposal Generation Platform
+          {challengeToken
+            ? 'Open your authenticator app and enter the 6-digit code.'
+            : 'Government Proposal Generation Platform'}
         </p>
 
         {error && (
@@ -88,100 +123,171 @@ export default function LoginPage() {
           </div>
         )}
 
-        <form onSubmit={handleSubmit}>
-          {/* Email */}
-          <div style={{ marginBottom: '12px' }}>
-            <label style={{ display: 'block', fontSize: '11px', color: '#5F5E5A', fontWeight: '500', marginBottom: '4px' }}>
-              Email address
-            </label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="analyst@agency.gov"
-              required
+        {challengeToken ? (
+          <form onSubmit={handleCodeSubmit}>
+            {/* 6-digit TOTP code */}
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', fontSize: '11px', color: '#5F5E5A', fontWeight: '500', marginBottom: '4px' }}>
+                Authentication code
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="000000"
+                autoFocus
+                required
+                style={{
+                  width: '100%',
+                  height: '34px',
+                  padding: '0 10px',
+                  fontSize: '14px',
+                  letterSpacing: '0.2em',
+                  textAlign: 'center',
+                  color: '#1C1C1A',
+                  backgroundColor: '#FFFFFF',
+                  border: '1px solid rgba(0,0,0,0.15)',
+                  borderRadius: '6px',
+                  outline: 'none',
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading || code.length !== 6}
               style={{
                 width: '100%',
-                height: '34px',
-                padding: '0 10px',
-                fontSize: '12px',
-                color: '#1C1C1A',
-                backgroundColor: '#FFFFFF',
-                border: '1px solid rgba(0,0,0,0.15)',
-                borderRadius: '6px',
-                outline: 'none',
-                boxSizing: 'border-box',
+                height: '36px',
+                backgroundColor: loading || code.length !== 6 ? '#B5D4F4' : '#185FA5',
+                color: '#FFFFFF',
+                border: 'none',
+                borderRadius: '8px',
+                fontSize: '13px',
+                fontWeight: '500',
+                cursor: loading || code.length !== 6 ? 'not-allowed' : 'pointer',
+                marginBottom: '12px',
               }}
-            />
-          </div>
+            >
+              {loading ? 'Verifying...' : 'Verify'}
+            </button>
 
-          {/* Password */}
-          <div style={{ marginBottom: '12px' }}>
-            <label style={{ display: 'block', fontSize: '11px', color: '#5F5E5A', fontWeight: '500', marginBottom: '4px' }}>
-              Password
-            </label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              required
+            <button
+              type="button"
+              onClick={() => { setChallengeToken(null); setCode(''); setError('') }}
               style={{
                 width: '100%',
-                height: '34px',
-                padding: '0 10px',
+                background: 'none',
+                border: 'none',
                 fontSize: '12px',
-                color: '#1C1C1A',
-                backgroundColor: '#FFFFFF',
-                border: '1px solid rgba(0,0,0,0.15)',
-                borderRadius: '6px',
-                outline: 'none',
-                boxSizing: 'border-box',
+                color: '#5F5E5A',
+                cursor: 'pointer',
               }}
-            />
-          </div>
+            >
+              Back to sign in
+            </button>
+          </form>
+        ) : (
+          <>
+            <form onSubmit={handleSubmit}>
+              {/* Email */}
+              <div style={{ marginBottom: '12px' }}>
+                <label style={{ display: 'block', fontSize: '11px', color: '#5F5E5A', fontWeight: '500', marginBottom: '4px' }}>
+                  Email address
+                </label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="analyst@agency.gov"
+                  required
+                  style={{
+                    width: '100%',
+                    height: '34px',
+                    padding: '0 10px',
+                    fontSize: '12px',
+                    color: '#1C1C1A',
+                    backgroundColor: '#FFFFFF',
+                    border: '1px solid rgba(0,0,0,0.15)',
+                    borderRadius: '6px',
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                  }}
+                />
+              </div>
 
-          {/* Remember me + Forgot */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#5F5E5A', cursor: 'pointer' }}>
-              <input type="checkbox" style={{ width: '13px', height: '13px', accentColor: '#185FA5' }} />
-              Remember me
-            </label>
-            <Link href="/request-access" style={{ fontSize: '12px', color: '#185FA5' }}>
-              Forgot password?
-            </Link>
-          </div>
+              {/* Password */}
+              <div style={{ marginBottom: '12px' }}>
+                <label style={{ display: 'block', fontSize: '11px', color: '#5F5E5A', fontWeight: '500', marginBottom: '4px' }}>
+                  Password
+                </label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
+                  style={{
+                    width: '100%',
+                    height: '34px',
+                    padding: '0 10px',
+                    fontSize: '12px',
+                    color: '#1C1C1A',
+                    backgroundColor: '#FFFFFF',
+                    border: '1px solid rgba(0,0,0,0.15)',
+                    borderRadius: '6px',
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                  }}
+                />
+              </div>
 
-          {/* Submit */}
-          <button
-            type="submit"
-            disabled={loading}
-            style={{
-              width: '100%',
-              height: '36px',
-              backgroundColor: loading ? '#B5D4F4' : '#185FA5',
-              color: '#FFFFFF',
-              border: 'none',
-              borderRadius: '8px',
-              fontSize: '13px',
-              fontWeight: '500',
-              cursor: loading ? 'not-allowed' : 'pointer',
-              marginBottom: '20px',
-            }}
-          >
-            {loading ? 'Signing in...' : 'Sign in'}
-          </button>
-        </form>
+              {/* Remember me + Forgot */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#5F5E5A', cursor: 'pointer' }}>
+                  <input type="checkbox" style={{ width: '13px', height: '13px', accentColor: '#185FA5' }} />
+                  Remember me
+                </label>
+                <Link href="/request-access" style={{ fontSize: '12px', color: '#185FA5' }}>
+                  Forgot password?
+                </Link>
+              </div>
 
-        {/* Divider */}
-        <div style={{ borderTop: '1px solid rgba(0,0,0,0.08)', marginBottom: '16px' }} />
+              {/* Submit */}
+              <button
+                type="submit"
+                disabled={loading}
+                style={{
+                  width: '100%',
+                  height: '36px',
+                  backgroundColor: loading ? '#B5D4F4' : '#185FA5',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontSize: '13px',
+                  fontWeight: '500',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  marginBottom: '20px',
+                }}
+              >
+                {loading ? 'Signing in...' : 'Sign in'}
+              </button>
+            </form>
 
-        <p style={{ fontSize: '12px', textAlign: 'center', color: '#888780' }}>
-          Need an account?{' '}
-          <Link href="/request-access" style={{ color: '#185FA5' }}>
-            Request access
-          </Link>
-        </p>
+            {/* Divider */}
+            <div style={{ borderTop: '1px solid rgba(0,0,0,0.08)', marginBottom: '16px' }} />
+
+            <p style={{ fontSize: '12px', textAlign: 'center', color: '#888780' }}>
+              Need an account?{' '}
+              <Link href="/request-access" style={{ color: '#185FA5' }}>
+                Request access
+              </Link>
+            </p>
+          </>
+        )}
       </div>
 
       {/* Footer */}
