@@ -77,6 +77,57 @@ def test_valid_models_produce_no_problems(monkeypatch):
     assert startup_checks.check_models() == []
 
 
+def test_light_tier_is_not_checked_when_not_configured(monkeypatch):
+    """Tiering is opt-in everywhere else in this codebase — an unconfigured
+    light tier must not cost an extra get_llm(tier="light") call at boot."""
+    monkeypatch.setattr(settings, "llm_model", "gemini-2.5-flash")
+    monkeypatch.setattr(settings, "embedding_model", "gemini-embedding-001")
+    monkeypatch.setattr(settings, "llm_model_light", "")
+    monkeypatch.setattr(settings, "llm_provider_light", "")
+    monkeypatch.setattr(
+        "app.services.llm.get_llm",
+        lambda: _Provider(["gemini-2.5-flash", "gemini-embedding-001"]),
+    )
+    # If check_models() called get_llm(tier="light") here, this would raise —
+    # the stub above accepts no arguments at all.
+
+    assert startup_checks.check_models() == []
+
+
+def test_a_bad_light_tier_model_is_caught_when_tiering_is_configured(monkeypatch):
+    monkeypatch.setattr(settings, "llm_model", "gemini-2.5-flash")
+    monkeypatch.setattr(settings, "embedding_model", "gemini-embedding-001")
+    monkeypatch.setattr(settings, "llm_model_light", "gemini-1.0-retired")
+    monkeypatch.setattr(settings, "llm_provider_light", "")
+
+    def _get_llm(tier="default"):
+        if tier == "light":
+            return _Provider(["gemini-2.5-flash-lite"])
+        return _Provider(["gemini-2.5-flash", "gemini-embedding-001"])
+
+    monkeypatch.setattr("app.services.llm.get_llm", _get_llm)
+
+    problems = startup_checks.check_models()
+    assert len(problems) == 1
+    assert "LLM_MODEL_LIGHT" in problems[0] and "gemini-1.0-retired" in problems[0]
+
+
+def test_a_valid_light_tier_model_produces_no_problems(monkeypatch):
+    monkeypatch.setattr(settings, "llm_model", "gemini-2.5-flash")
+    monkeypatch.setattr(settings, "embedding_model", "gemini-embedding-001")
+    monkeypatch.setattr(settings, "llm_model_light", "gemini-2.5-flash-lite")
+    monkeypatch.setattr(settings, "llm_provider_light", "")
+
+    def _get_llm(tier="default"):
+        if tier == "light":
+            return _Provider(["gemini-2.5-flash-lite"])
+        return _Provider(["gemini-2.5-flash", "gemini-embedding-001"])
+
+    monkeypatch.setattr("app.services.llm.get_llm", _get_llm)
+
+    assert startup_checks.check_models() == []
+
+
 def test_an_unreachable_provider_is_not_treated_as_invalid(monkeypatch):
     """"We could not ask" must never read as "this model does not exist" — a
     network blip at boot must not refuse to start the process."""

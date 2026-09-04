@@ -65,11 +65,30 @@ pick up a task before migrations have actually run.
 
 ## LLM provider
 
-Swappable via `LLM_PROVIDER` (`gemini` | `featherless`) — `app/services/llm/`.
+Swappable via `LLM_PROVIDER` (`gemini` | `featherless` | `openai_compatible`) —
+`app/services/llm/`, dispatched through a registry (`_PROVIDER_FACTORIES` in
+`llm/__init__.py`), not an if/elif chain — adding a provider that needs
+genuinely new code is a one-line registration next to the others.
+`openai_compatible` (`llm/openai_compatible.py`) needs no new code at all: set
+`LLM_BASE_URL`/`LLM_API_KEY` to point at *any* OpenAI-compatible host —
+OpenRouter, Together, a self-hosted vLLM/Ollama/LM Studio instance, etc.
+`featherless` is just a preset of that same adapter (fixed base URL, reads
+`FEATHERLESS_API_KEY`).
+
 `get_llm(tier="default"|"light")`: `"light"` is for mechanical calls (HyDE query
-generation, compliance-matrix structuring) and uses `LLM_MODEL_LIGHT` if set,
-else falls back to `LLM_MODEL` — tiering is opt-in, unset means no behavior
-change. The final section draft always uses the default tier.
+generation, compliance/solicitation-matrix structuring) and uses `LLM_MODEL_LIGHT`
+if set, else falls back to `LLM_MODEL` — tiering is opt-in, unset means no
+behavior change. `LLM_PROVIDER_LIGHT` similarly overrides the *provider* for the
+light tier only (e.g. a free/local backend for mechanical calls while the
+default tier stays on a paid vendor) — same opt-in fallback. The final section
+draft always uses the default tier's provider and model.
+
+Every provider should implement `available_models()` (`llm/base.py`) so
+`startup_checks.check_models()` can validate `LLM_MODEL`/`LLM_MODEL_LIGHT`
+against the actual API key at boot instead of failing silently minutes later
+inside a Celery task (see Diagnostics below) — this now covers both tiers, and
+both `gemini` and the whole `openai_compatible` family (Featherless included)
+implement it via each host's `/models` listing endpoint.
 
 **Gemini free tier is 20 requests/day per model** — drafting fires several LLM
 calls per section (HyDE + generation, per requirement), so it exhausts fast,

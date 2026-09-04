@@ -99,6 +99,24 @@ def test_run_solicitation_extraction_returns_validated_summary(monkeypatch):
     assert dumped["instructions_to_offerors"][0]["applies_to"] == "Volume I"
 
 
+def test_call_extractor_uses_the_light_tier(monkeypatch):
+    """Same task shape as compliance_extractor's (literal, cited, schema-
+    constrained extraction, run concurrently against the same document) — it
+    should cost the same tier, not the default one."""
+    calls = []
+
+    class _StubProvider:
+        def generate_structured(self, prompt, schema, *, system=None):
+            calls.append(prompt)
+            return _full_summary()
+
+    monkeypatch.setattr(se, "get_llm", lambda tier="default": calls.append(tier) or _StubProvider())
+
+    se._call_extractor("some markdown")
+
+    assert calls[0] == "light"
+
+
 def test_null_and_empty_shape_round_trips(monkeypatch):
     """Absent fields serialize as null; absent lists as []."""
     empty = SolicitationSummary(

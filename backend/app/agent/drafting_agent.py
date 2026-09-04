@@ -29,16 +29,19 @@ the provider-agnostic `app.services.llm` port (telemetry lives in the adapter).
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Optional, TypedDict
 from uuid import UUID
 
 from pydantic import BaseModel, Field
 
 from app.core import cache
+from app.core import logging as applog
 from app.core.config import settings
 from app.services import document_service as docs
 from app.services import profile_service
 from app.services import proposals_service
+from app.services import trajectory_service
 from app.services.compliance_extractor import (
     ANSWERABLE_CATEGORIES,
     EVALUATION_CATEGORY,
@@ -226,6 +229,11 @@ class DraftingState(TypedDict):
     # The proposal being drafted, not the RFP behind it: sections are saved
     # against it, and one RFP may back several proposals.
     proposal_id: str
+    # One id per run_drafting() invocation, shared across every section drafted
+    # in it — minted once in run_drafting (not derived from Celery's task_id,
+    # since drafting also runs outside Celery in tests) so the trajectory log
+    # can group a run's sections without depending on ambient logging context.
+    run_id: str
     uploaded_by: str
     section: dict                    # one resolved section (title/brief/requirements/criteria/content)
     sol_context: Optional[str]       # document-level framing from the solicitation summary
@@ -246,6 +254,12 @@ class DraftingState(TypedDict):
     stalled: bool                    # True once a revision repeated the prior round's
                                       # exact findings — stop spending budget on it
     section_id: Optional[str]        # id of the persisted section, set by save_section
+    attempt_records: list[dict]      # one entry per draft attempt (content/grounding
+                                      # from draft_section, merged with that attempt's
+                                      # critic verdict from check_compliance) — the full
+                                      # history save_section persists to
+                                      # drafting_trajectories, where feedback_history
+                                      # above only ever exposed the latest round
 
 
 # ---------------------------------------------------------------------------
@@ -529,16 +543,36 @@ def _draft_section_node(state: DraftingState) -> DraftingState:
         # score and citation chips. A revision replaces them, so what is stored
         # describes the attempt that was actually persisted.
         citations = result.get("citations") or []
+        guardrail_error = None
+        draft_error = None
     except DraftGuardrailError as exc:
         # Expected rejection: keep the run going; flag for human attention at save.
         logger.warning("drafting: section '%s' failed guardrail: %s", section["title"], exc)
         content = None
-    except Exception:
+        guardrail_error = str(exc)
+        draft_error = None
+    except Exception as exc:
         # Isolate any other draft-time failure (retrieval, LLM timeout, etc.) to
         # this section so one bad section can't sink the whole proposal run. It
         # is persisted empty and surfaced for a human, same as a guardrail reject.
         logger.exception("drafting: section '%s' draft failed unexpectedly", section["title"])
         content = None
+        guardrail_error = None
+        draft_error = repr(exc)
+
+    # One entry per attempt, appended here and merged with this attempt's critic
+    # verdict (if any) in check_compliance — see DraftingState.attempt_records.
+    attempt_record = {
+        "attempt": attempts,
+        "drafted_at": datetime.now(timezone.utc).isoformat(),
+        "content_length": len(content) if content else 0,
+        "grounded": grounded,
+        "weak_grounding": weak_grounding,
+        "guardrail_error": guardrail_error,
+        "draft_error": draft_error,
+        "critic": None,
+    }
+    attempt_records = (state.get("attempt_records") or []) + [attempt_record]
 
     return {
         **state,
@@ -552,6 +586,7 @@ def _draft_section_node(state: DraftingState) -> DraftingState:
             "citations": citations,
         },
         "attempts": attempts,
+        "attempt_records": attempt_records,
     }
 
 
@@ -656,6 +691,19 @@ def _review_feedback(review: ComplianceReview) -> str:
     return "\n".join(parts)
 
 
+def _merge_critic_verdict(attempt_records: list[dict], verdict: dict) -> list[dict]:
+    """Merges a critic verdict into the most recent attempt record.
+
+    draft_section appends one record per attempt with `critic: None`; this
+    fills it in once check_compliance has actually reviewed that attempt's
+    content, so the two nodes' contributions to one attempt end up as a single
+    JSON object in drafting_trajectories rather than two disjoint threads.
+    """
+    if not attempt_records:
+        return attempt_records
+    return attempt_records[:-1] + [{**attempt_records[-1], "critic": verdict}]
+
+
 def _check_compliance_node(state: DraftingState) -> DraftingState:
     """Critiques the current draft; sets `feedback` when a revision is warranted."""
     section = state["section"]
@@ -677,14 +725,22 @@ def _check_compliance_node(state: DraftingState) -> DraftingState:
             company_context=state.get("company_context"),
             citations=section.get("citations"),
         )
-    except Exception:
+    except Exception as exc:
         # A failed critic must neither sink the run nor silently pass the draft:
         # skip revision and let it through as needs_review for a human to verify.
         # Same staleness reasoning as above: this content was never reviewed.
         logger.exception(
             "drafting: compliance review failed for '%s'; saving unreviewed", section["title"]
         )
-        return {**state, "feedback": None, "cited_sources": None}
+        attempt_records = _merge_critic_verdict(
+            state.get("attempt_records") or [], {"error": repr(exc)}
+        )
+        return {
+            **state,
+            "feedback": None,
+            "cited_sources": None,
+            "attempt_records": attempt_records,
+        }
 
     if review is None:
         return {**state, "feedback": None, "cited_sources": None}
@@ -693,7 +749,24 @@ def _check_compliance_node(state: DraftingState) -> DraftingState:
     # us which evidence the final, saved draft actually leans on.
     cited_sources = list(review.cited_sources)
     if review.passes():
-        return {**state, "feedback": None, "cited_sources": cited_sources}
+        attempt_records = _merge_critic_verdict(
+            state.get("attempt_records") or [],
+            {
+                "addressed": review.addressed,
+                "evaluation_alignment": review.evaluation_alignment,
+                "benefit_mapped": review.benefit_mapped,
+                "unsupported_claims": review.unsupported_claims,
+                "filler_found": review.filler_found,
+                "cited_sources": review.cited_sources,
+                "feedback": review.feedback,
+            },
+        )
+        return {
+            **state,
+            "feedback": None,
+            "cited_sources": cited_sources,
+            "attempt_records": attempt_records,
+        }
 
     feedback = _review_feedback(review)
     # Convergence check: if the exact same unsupported claims/filler survived a
@@ -730,6 +803,20 @@ def _check_compliance_node(state: DraftingState) -> DraftingState:
     # verdict, not the accumulated trail. `feedback_history` is the trail itself,
     # threaded to the writer via `_combined_feedback` on the next attempt.
     history = (state.get("feedback_history") or []) + [feedback]
+    attempt_records = _merge_critic_verdict(
+        state.get("attempt_records") or [],
+        {
+            "addressed": review.addressed,
+            "evaluation_alignment": review.evaluation_alignment,
+            "benefit_mapped": review.benefit_mapped,
+            "unsupported_claims": review.unsupported_claims,
+            "filler_found": review.filler_found,
+            "cited_sources": review.cited_sources,
+            # The instruction actually threaded to the next round/save (may carry
+            # the stalled-loop note appended above), not just the raw critic text.
+            "feedback": feedback,
+        },
+    )
     return {
         **state,
         "feedback": feedback,
@@ -737,6 +824,7 @@ def _check_compliance_node(state: DraftingState) -> DraftingState:
         "cited_sources": cited_sources,
         "prior_findings": findings,
         "stalled": stalled,
+        "attempt_records": attempt_records,
     }
 
 
@@ -822,7 +910,52 @@ def _save_section_node(state: DraftingState) -> DraftingState:
         # sequence once concurrent completion times are involved.
         sort_order=section.get("sort_order", 0),
     )
+    _record_trajectory(
+        state,
+        section=section,
+        section_id=section_id,
+        content=content,
+    )
     return {**state, "section_id": str(section_id)}
+
+
+def _record_trajectory(
+    state: DraftingState,
+    section: dict,
+    section_id: Optional[UUID],
+    content: Optional[str],
+) -> None:
+    """Persists this section's full attempt history to drafting_trajectories.
+
+    Best-effort: a trajectory-write failure must never abort a drafting run —
+    it is strictly a debugging aid layered on top of the section save that
+    already succeeded (or was correctly recorded as empty) above.
+    """
+    attempt_records = state.get("attempt_records") or []
+    if content:
+        final_status = "saved"
+    elif attempt_records and attempt_records[-1].get("guardrail_error"):
+        final_status = "guardrail_rejected"
+    else:
+        final_status = "draft_failed"
+    try:
+        trajectory_service.record_section_trajectory(
+            run_id=state["run_id"],
+            proposal_id=UUID(state["proposal_id"]),
+            section_id=section_id,
+            section_title=section["title"],
+            outline_index=section.get("sort_order", 0),
+            attempts=attempt_records,
+            stalled=state.get("stalled", False),
+            final_status=final_status,
+        )
+    except Exception:
+        logger.exception(
+            "drafting: failed to record trajectory for section '%s' (run=%s) — "
+            "the section itself was saved fine, this only affects debugging.",
+            section["title"],
+            state.get("run_id"),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +1019,10 @@ async def run_drafting(proposal_id: UUID, retrieval_filters: Optional[dict] = No
     proposal = UUID(str(proposal_id))
     rfp = proposals_service.rfp_for_proposal_unscoped(proposal)
     proposals_service.set_drafting_status(proposal, "drafting")
+    # One id per invocation, shared by every section drafted in it — not
+    # Celery's task_id, since this also runs directly in tests/outside Celery.
+    # Groups a run's drafting_trajectories rows; see DraftingState.run_id.
+    run_id = applog.new_request_id()
     try:
         # Loading + planning are blocking (DB + one LLM call); run off the loop.
         uploaded_by, requirements, summary, profile = await asyncio.to_thread(
@@ -930,6 +1067,7 @@ async def run_drafting(proposal_id: UUID, retrieval_filters: Optional[dict] = No
             section["sort_order"] = outline_index
             state: DraftingState = {
                 "proposal_id": str(proposal),
+                "run_id": run_id,
                 "uploaded_by": uploaded_by,
                 "section": section,
                 "sol_context": sol_context,
@@ -942,7 +1080,13 @@ async def run_drafting(proposal_id: UUID, retrieval_filters: Optional[dict] = No
                 "prior_findings": None,
                 "stalled": False,
                 "section_id": None,
+                "attempt_records": [],
             }
+            # Belt-and-suspenders: attempt_records/the trajectory row are the
+            # actual source of truth, but binding run_id here also correlates
+            # this section's ordinary log lines to the run, same convention as
+            # tasks.py's applog.bind_context(proposal_id=proposal_id).
+            applog.bind_context(run_id=run_id)
             async with semaphore:
                 try:
                     # LangGraph invoke is synchronous; run each section's subgraph in
@@ -953,8 +1097,27 @@ async def run_drafting(proposal_id: UUID, retrieval_filters: Optional[dict] = No
                 except Exception:
                     # Isolate an unexpected per-section failure (e.g. the DB save)
                     # so one section can't sink the whole run; the in-node guards
-                    # already absorb draft/critic errors.
+                    # already absorb draft/critic errors. Still worth a trajectory
+                    # row — best-effort, fail-open, same as _record_trajectory.
                     logger.exception("drafting: section '%s' failed; skipping", section["title"])
+                    try:
+                        trajectory_service.record_section_trajectory(
+                            run_id=run_id,
+                            proposal_id=proposal,
+                            section_id=None,
+                            section_title=section["title"],
+                            outline_index=outline_index,
+                            attempts=state.get("attempt_records") or [],
+                            stalled=False,
+                            final_status="run_exception",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "drafting: failed to record trajectory for section '%s' "
+                            "(run=%s) after an unhandled failure",
+                            section["title"],
+                            run_id,
+                        )
                     return None
                 return final["section_id"]
 

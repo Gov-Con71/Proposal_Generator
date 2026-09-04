@@ -393,3 +393,60 @@ def test_drafting_a_proposal_with_no_requirements_is_a_409(
     assert resp.status_code == 409
     # And nothing was left claiming to be in progress.
     assert test_client.get(f"/proposals/{proposal_id}", headers=auth).json()["draftingStatus"] == "idle"
+
+
+def test_drafting_trajectory_returns_recorded_attempts(
+    test_client, proposal_with_requirements, other_tenant
+):
+    """GET .../drafting/trajectory surfaces the full per-attempt history a real
+    drafting run would have written via trajectory_service — not just the
+    latest reviewNotes that GET .../sections exposes."""
+    from app.services import trajectory_service
+
+    proposal_id = proposal_with_requirements["proposal_id"]
+    auth = _auth(proposal_with_requirements["user_id"])
+
+    run_id = str(uuid.uuid4())
+    trajectory_service.record_section_trajectory(
+        run_id=run_id,
+        proposal_id=proposal_id,
+        section_id=None,
+        section_title="Technical Approach",
+        outline_index=0,
+        attempts=[
+            {"attempt": 1, "critic": {"addressed": False, "feedback": "Cite a contract."}},
+            {"attempt": 2, "critic": {"addressed": True, "feedback": ""}},
+        ],
+        stalled=False,
+        final_status="saved",
+    )
+
+    resp = test_client.get(f"/proposals/{proposal_id}/drafting/trajectory", headers=auth)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["runId"] == run_id
+    assert len(body["sections"]) == 1
+    section = body["sections"][0]
+    assert section["sectionTitle"] == "Technical Approach"
+    assert section["attemptCount"] == 2
+    assert len(section["attempts"]) == 2
+    # Round 1's feedback survives here, unlike proposal_sections.review_notes
+    # which only ever keeps the latest round.
+    assert section["attempts"][0]["critic"]["feedback"] == "Cite a contract."
+
+    # Tenant isolation: another user can't read this proposal's trajectory.
+    other_auth = _auth(other_tenant)
+    assert (
+        test_client.get(
+            f"/proposals/{proposal_id}/drafting/trajectory", headers=other_auth
+        ).status_code
+        == 404
+    )
+
+
+def test_drafting_trajectory_404s_when_no_run_recorded(test_client, proposal_with_requirements):
+    proposal_id = proposal_with_requirements["proposal_id"]
+    auth = _auth(proposal_with_requirements["user_id"])
+
+    resp = test_client.get(f"/proposals/{proposal_id}/drafting/trajectory", headers=auth)
+    assert resp.status_code == 404

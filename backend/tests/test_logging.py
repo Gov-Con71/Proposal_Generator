@@ -151,6 +151,17 @@ def test_json_format_carries_context_as_queryable_fields(json_logs):
     assert entry["logger"] == "app.services.ingestion"
 
 
+def test_run_id_is_a_bindable_context_field(json_logs):
+    """run_id (drafting_agent.py) must round-trip through bind_context like any
+    other identifier — see migration 0016's drafting_trajectories, which a log
+    line's run_id should be groupable against."""
+    applog.bind_context(run_id="run-1")
+    logging.getLogger("app.agent.drafting_agent").info("drafting section")
+
+    (entry,) = _json_lines(json_logs.getvalue())
+    assert entry["run_id"] == "run-1"
+
+
 def test_json_format_records_the_traceback(json_logs):
     """`logger.exception` is useless if the traceback is dropped in transit —
     the stack is the "exactly where" the whole system is for."""

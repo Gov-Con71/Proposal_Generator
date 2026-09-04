@@ -81,6 +81,52 @@ def test_tiers_are_cached_independently(monkeypatch):
     assert get_llm(tier="light") is not light_first  # rebuilt after reset
 
 
+def test_openai_compatible_reads_base_url_and_api_key(monkeypatch):
+    """Any OpenAI-compatible host is reachable via config alone — no adapter
+    module needed for a third vendor, unlike gemini/featherless."""
+    from app.services.llm.openai_compatible import OpenAICompatibleProvider
+
+    monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
+    monkeypatch.setattr(settings, "llm_base_url", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(settings, "llm_api_key", "or-key")
+
+    provider = get_llm()
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider._base_url == "https://openrouter.ai/api/v1"
+    assert provider._api_key == "or-key"
+
+
+def test_openai_compatible_requires_a_base_url(monkeypatch):
+    monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
+    monkeypatch.setattr(settings, "llm_base_url", "")
+
+    with pytest.raises(ValueError, match="LLM_BASE_URL"):
+        get_llm()
+
+
+def test_provider_light_overrides_the_provider_for_the_light_tier(monkeypatch):
+    """LLM_PROVIDER_LIGHT lets light-tier work run on an entirely different
+    backend than the default tier — not just a cheaper model on the same one."""
+    from app.services.llm.featherless import FeatherlessProvider
+    from app.services.llm.gemini import GeminiProvider
+
+    monkeypatch.setattr(settings, "llm_provider", "gemini")
+    monkeypatch.setattr(settings, "llm_provider_light", "featherless")
+
+    assert isinstance(get_llm(tier="default"), GeminiProvider)
+    assert isinstance(get_llm(tier="light"), FeatherlessProvider)
+
+
+def test_provider_light_falls_back_to_the_main_provider_when_unset(monkeypatch):
+    from app.services.llm.gemini import GeminiProvider
+
+    monkeypatch.setattr(settings, "llm_provider", "gemini")
+    monkeypatch.setattr(settings, "llm_provider_light", "")
+
+    assert isinstance(get_llm(tier="light"), GeminiProvider)
+    assert isinstance(get_llm(tier="default"), GeminiProvider)
+
+
 def test_a_custom_provider_satisfies_the_interface():
     """Demonstrates a second platform can be dropped in behind the same port."""
 

@@ -71,12 +71,51 @@ def _redis_target() -> str:
     return url
 
 
+def _check_light_tier_model() -> list[str]:
+    """Validates LLM_MODEL_LIGHT against the light tier's own provider.
+
+    Only called when the light tier is actually configured differently (see
+    check_models) — a second get_llm(tier="light") call for an unconfigured
+    light tier would just repeat the default tier's own check (same provider,
+    same model) with an extra network round-trip at boot for no new
+    information. Same "unknown is not invalid" contract as the default check.
+    """
+    problems: list[str] = []
+    try:
+        from app.services.llm import get_llm
+
+        available = get_llm(tier="light").available_models()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("startup: could not query the light-tier LLM provider: %s", exc)
+        return problems
+
+    if available is None:
+        logger.info(
+            "startup: light-tier LLM provider cannot enumerate models — model "
+            "names unverified"
+        )
+        return problems
+
+    configured = settings.llm_model_light or settings.llm_model
+    if configured not in set(available):
+        problems.append(
+            f"LLM_MODEL_LIGHT={configured!r} is not available to this API key. "
+            f"This is the failure that reads as a quota error (§1.1)."
+        )
+    return problems
+
+
 def check_models() -> list[str]:
-    """Validates the configured model names against the provider.
+    """Validates the configured model names against the provider(s) in use.
 
     Returns a list of problems (empty when fine). A provider that cannot
     enumerate its models, or cannot be reached, yields no problems — "unknown"
     must not read as "invalid", or a network blip would refuse to boot.
+
+    Also validates the light tier's model — but only when it's actually
+    configured differently (LLM_MODEL_LIGHT or LLM_PROVIDER_LIGHT set):
+    tiering is opt-in everywhere else in this codebase, and checking an
+    unconfigured light tier would just repeat the default tier's own check.
     """
     problems: list[str] = []
     try:
@@ -85,28 +124,36 @@ def check_models() -> list[str]:
         available = get_llm().available_models()
     except Exception as exc:  # noqa: BLE001
         logger.warning("startup: could not query the LLM provider: %s", exc)
-        return problems
+        available = None
 
     if available is None:
         logger.info(
             "startup: LLM provider '%s' cannot enumerate models — model names unverified",
             settings.llm_provider,
         )
-        return problems
+    else:
+        known = set(available)
+        for label, configured in (
+            ("LLM_MODEL", settings.llm_model),
+            ("EMBEDDING_MODEL", settings.embedding_model),
+        ):
+            if configured and configured not in known:
+                problems.append(
+                    f"{label}={configured!r} is not available to this API key. "
+                    f"This is the failure that reads as a quota error (§1.1)."
+                )
 
-    known = set(available)
-    for label, configured in (
-        ("LLM_MODEL", settings.llm_model),
-        ("EMBEDDING_MODEL", settings.embedding_model),
-    ):
-        if configured and configured not in known:
-            problems.append(
-                f"{label}={configured!r} is not available to this API key. "
-                f"This is the failure that reads as a quota error (§1.1)."
-            )
+    if settings.llm_model_light or settings.llm_provider_light:
+        problems += _check_light_tier_model()
+
     if not problems:
         logger.info(
-            "startup: models OK (%s, %s)", settings.llm_model, settings.embedding_model
+            "startup: models OK (%s, %s%s)",
+            settings.llm_model,
+            settings.embedding_model,
+            f", light={settings.llm_model_light or settings.llm_model}"
+            if (settings.llm_model_light or settings.llm_provider_light)
+            else "",
         )
     return problems
 

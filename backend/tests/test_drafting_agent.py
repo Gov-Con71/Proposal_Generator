@@ -146,6 +146,29 @@ def _fetch_sections(proposal_id: str) -> list[dict]:
     ]
 
 
+def _fetch_trajectories(proposal_id: str) -> list[dict]:
+    conn = psycopg2.connect(settings.database_url)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT section_title, final_status, stalled, attempt_count, attempts "
+        "FROM drafting_trajectories WHERE proposal_id = %s ORDER BY outline_index;",
+        (proposal_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [
+        {
+            "section_title": r[0],
+            "final_status": r[1],
+            "stalled": r[2],
+            "attempt_count": r[3],
+            "attempts": r[4],
+        }
+        for r in rows
+    ]
+
+
 def test_draft_full_proposal_end_to_end(seeded_rfp, monkeypatch):
     rfp_id = seeded_rfp["rfp_id"]
     proposal_id = seeded_rfp["proposal_id"]
@@ -184,6 +207,34 @@ def test_draft_full_proposal_end_to_end(seeded_rfp, monkeypatch):
     linked = {s["title"]: s["requirement_id"] for s in sections}
     assert linked["Technical Approach"] == req_ids[0]
     assert linked["Security Plan"] == req_ids[1]
+
+
+def test_trajectory_write_failure_does_not_fail_the_run(seeded_rfp, monkeypatch):
+    """A trajectory-write failure must be fail-open: the run still completes and
+    the section still saves, exactly as if trajectory recording didn't exist."""
+    proposal_id = seeded_rfp["proposal_id"]
+
+    def fake_planner(_prompt):
+        return ProposalOutline(sections=[_planned("Technical Approach", [0], "t")])
+
+    monkeypatch.setattr(drafting_agent, "_call_planner", fake_planner)
+    monkeypatch.setattr(drafting_agent, "_call_critic", _passing_critic)
+    fake_section_draft, _ = _fake_draft("Draft.")
+    monkeypatch.setattr(drafting_agent, "generate_section_draft", fake_section_draft)
+
+    def exploding_record(*args, **kwargs):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(
+        drafting_agent.trajectory_service, "record_section_trajectory", exploding_record
+    )
+
+    result = drafting_agent.run_drafting_sync(proposal_id)
+
+    assert result["sections"] == 1
+    sections = _fetch_sections(proposal_id)
+    assert sections[0]["content"] == "Draft."
+    assert _fetch_trajectories(proposal_id) == []
 
 
 def test_retrieval_filters_reach_every_sections_draft_call(seeded_rfp, monkeypatch):
@@ -312,6 +363,18 @@ def test_critic_drives_one_revision(seeded_rfp, monkeypatch):
     assert len(sections) == 1
     assert sections[0]["content"] == "Draft v2."
     assert sections[0]["status"] == "needs_review"
+
+    # Both revision rounds survive in the trajectory — unlike review_notes,
+    # which only ever holds the latest round's feedback.
+    trajectories = _fetch_trajectories(proposal_id)
+    assert len(trajectories) == 1
+    traj = trajectories[0]
+    assert traj["final_status"] == "saved"
+    assert traj["attempt_count"] == 2
+    assert len(traj["attempts"]) == 2
+    assert traj["attempts"][0]["critic"]["feedback"] == "Cite a specific past contract."
+    assert traj["attempts"][0]["critic"]["addressed"] is False
+    assert traj["attempts"][1]["critic"]["addressed"] is True
 
 
 def test_revision_feedback_accumulates_across_multiple_rounds(seeded_rfp, monkeypatch):
@@ -497,6 +560,10 @@ def test_critic_loop_stops_early_when_findings_stop_changing(seeded_rfp, monkeyp
     assert sections[0]["status"] == "needs_review"
     assert "repeated the same finding" in sections[0]["review_notes"]
 
+    traj = _fetch_trajectories(proposal_id)[0]
+    assert traj["stalled"] is True
+    assert traj["attempt_count"] == 2
+
 
 def test_critic_loop_does_not_stall_on_differing_findings(seeded_rfp, monkeypatch):
     """A revision that changes *what* the critic flags (not just re-flags the
@@ -561,6 +628,12 @@ def test_draft_failure_is_isolated_to_section(seeded_rfp, monkeypatch):
     assert sections[0]["status"] == "empty"
     assert sections[0]["requirement_id"] == req_ids[0]
 
+    # A trajectory row still exists, recording the draft-time exception, even
+    # though the section itself has no content to show for it.
+    traj = _fetch_trajectories(proposal_id)[0]
+    assert traj["final_status"] == "draft_failed"
+    assert traj["attempts"][0]["draft_error"] is not None
+
 
 def test_exhausted_critic_persists_review_notes(seeded_rfp, monkeypatch):
     """When the revision budget is spent with the critic still flagging gaps, the
@@ -621,6 +694,13 @@ def test_critic_failure_saves_draft_unreviewed(seeded_rfp, monkeypatch):
     # Exactly one draft attempt — a failed critic does not trigger a revision.
     assert len(draft_calls) == 1
     assert draft_calls[0]["feedback"] is None
+
+    # The section still saves, and the trajectory records the critic failure
+    # against that attempt rather than silently showing no review ever happened.
+    assert result["sections"] == 1
+    traj = _fetch_trajectories(proposal_id)[0]
+    assert traj["attempt_count"] == 1
+    assert "error" in traj["attempts"][0]["critic"]
 
     # The draft is persisted for a human to verify, not dropped.
     assert result["sections"] == 1

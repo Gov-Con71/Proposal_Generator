@@ -31,7 +31,7 @@ from app.models.contract import (
     SectionUpdate,
 )
 from app.services import document_service as docs
-from app.services import draft_writer, proposals_service, workspace_service as ws
+from app.services import draft_writer, proposals_service, trajectory_service, workspace_service as ws
 from app.worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,28 @@ class DraftQueuedResponse(CamelModel):
     # status — see migration 0005.
     drafting_status: str
     requirements_count: int
+
+
+class SectionTrajectory(CamelModel):
+    """One section's full attempt history for a drafting run.
+
+    Unlike `ProposalSection.reviewNotes` (the critic's *latest* feedback only),
+    `attempts` is every round in order — see migration 0016.
+    """
+
+    section_id: Optional[str] = None
+    section_title: str
+    outline_index: int
+    final_status: Optional[str] = None
+    stalled: bool
+    attempt_count: int
+    attempts: list[dict]
+
+
+class DraftingTrajectoryResponse(CamelModel):
+    run_id: str
+    proposal_id: str
+    sections: list[SectionTrajectory]
 
 
 def _guard(fn, *args):
@@ -261,6 +283,37 @@ def draft_proposal(
         drafting_status="drafting",
         requirements_count=requirements_count,
     )
+
+
+@router.get(
+    "/proposals/{proposal_id}/drafting/trajectory",
+    response_model=DraftingTrajectoryResponse,
+    summary="Get the per-attempt trajectory of a drafting run (debugging)",
+)
+def get_drafting_trajectory(
+    proposal_id: UUID,
+    run_id: Optional[UUID] = None,
+    user_id: UUID = Depends(get_current_user_id),
+) -> DraftingTrajectoryResponse:
+    """Every section's full draft/critic attempt history for one drafting run.
+
+    `run_id` omitted resolves to the proposal's most recent run. Unlike
+    `GET /sections`, which only ever shows the final saved content and the
+    critic's latest feedback, this surfaces every revision round — what was
+    drafted, what the critic flagged, and whether the loop stalled — for
+    diagnosing why a section needed review or never saved at all.
+    """
+    try:
+        proposals_service.get_proposal(proposal_id, user_id)
+    except proposals_service.NotFoundError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found.") from exc
+
+    trajectory = trajectory_service.get_trajectory(proposal_id, run_id)
+    if trajectory is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "No drafting run recorded for this proposal."
+        )
+    return DraftingTrajectoryResponse.model_validate(trajectory)
 
 
 @router.post(

@@ -15,12 +15,28 @@ logger = logging.getLogger("llm.telemetry")
 
 # Rough public list prices (USD per 1M tokens) for cost estimation. Adjust as
 # pricing changes — this is for a ballpark spend dashboard, not billing.
+#
+# Every model either provider adapter can be configured with (see .env's
+# LLM_MODEL/LLM_MODEL_LIGHT/EMBEDDING_MODEL) must have an entry here, even a
+# genuinely-zero one — see `_cost`'s "priced" distinction below. A model
+# missing from this table entirely doesn't mean it's free; it means nobody's
+# told this table about it yet, and est_cost_usd would otherwise report an
+# identical, indistinguishable 0.0 either way.
 _PRICES = {
     "gemini-2.5-flash": {"in": 0.30, "out": 2.50},
     "gemini-embedding-001": {"in": 0.15, "out": 0.0},
     # Retained so historical spend for retired models still resolves.
     "gemini-2.0-flash": {"in": 0.10, "out": 0.40},
     "text-embedding-004": {"in": 0.0, "out": 0.0},
+    # Featherless (LLM_PROVIDER=featherless) bills a flat monthly subscription,
+    # not per-token — see CLAUDE.md's "flat-rate, no daily cap". There is no
+    # meaningful per-call dollar figure to attribute here, so these are
+    # genuinely $0, not "unpriced" — call/token counts (tracked accurately
+    # regardless) are the right metric for judging tiering's savings on this
+    # provider, not est_cost_usd.
+    "Qwen/Qwen2.5-72B-Instruct": {"in": 0.0, "out": 0.0},
+    "Qwen/Qwen2.5-7B-Instruct": {"in": 0.0, "out": 0.0},
+    "Qwen/Qwen3-Embedding-8B": {"in": 0.0, "out": 0.0},
 }
 
 _H_CALLS = "llm:calls"
@@ -121,6 +137,12 @@ def metrics_snapshot() -> dict:
             "tokens_out": out_tok,
             "avg_latency_ms": round(latency_sum / n, 1) if n else 0.0,
             "est_cost_usd": cost,
+            # False means this model has no _PRICES entry at all — est_cost_usd
+            # is a meaningless 0.0, not a real "this is free". True (including
+            # Featherless's genuinely-flat-rate models) means the 0.0, if any,
+            # is an actual answer. Without this, the two cases are otherwise
+            # indistinguishable in the response.
+            "priced": model in _PRICES,
         }
         totals["calls"] += n
         totals["errors"] += err
