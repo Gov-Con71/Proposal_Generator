@@ -18,24 +18,39 @@ script, and the script-readable credential is short-lived.
 
 import logging
 from datetime import timezone
+from typing import Union
+from uuid import UUID
 
+import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.core import rate_limit
 from app.core.config import settings
-from app.core.deps import get_current_user_id, require_role
+from app.core.deps import get_current_user, get_current_user_id, require_role
 from app.core.password_policy import WeakPasswordError, validate_password
-from app.core.security import create_access_token
+from app.core.security import (
+    create_access_token,
+    create_two_factor_challenge_token,
+    decode_two_factor_challenge_token,
+    hash_refresh_token,
+)
 from app.models.contract import (
+    ActiveSession,
     LoginRequest,
     MessageResponse,
     PasswordChangeRequest,
     RegisterRequest,
     Session,
     SetActiveRequest,
+    TwoFactorChallenge,
+    TwoFactorDisableRequest,
+    TwoFactorLoginRequest,
+    TwoFactorSetupResponse,
+    TwoFactorVerifyRequest,
     User,
 )
 from app.services import refresh_token_service as refresh_tokens
+from app.services import totp_service as totp
 from app.services import user_service as users
 
 logger = logging.getLogger(__name__)
@@ -77,10 +92,15 @@ def _clear_refresh_cookie(response: Response) -> None:
     )
 
 
-def _open_session(user: dict, response: Response) -> Session:
+def _open_session(user: dict, request: Request, response: Response) -> Session:
     """Issues an access token in the body and a refresh token in the cookie."""
     token, expire = create_access_token(user["id"])
-    _set_refresh_cookie(response, refresh_tokens.issue(user["id"]))
+    raw = refresh_tokens.issue(
+        user["id"],
+        user_agent=request.headers.get("user-agent"),
+        ip_address=rate_limit.client_ip(request),
+    )
+    _set_refresh_cookie(response, raw)
     return Session(
         user=User(**user),
         access_token=token,
@@ -134,11 +154,17 @@ def register(payload: RegisterRequest, request: Request, response: Response) -> 
         ) from exc
 
     rate_limit.record_failure("register_ip", ip, settings.register_window_seconds)
-    return _open_session(user, response)
+    return _open_session(user, request, response)
 
 
-@router.post("/login", response_model=Session, summary="Authenticate and open a session")
-def login(payload: LoginRequest, request: Request, response: Response) -> Session:
+@router.post(
+    "/login",
+    response_model=Union[Session, TwoFactorChallenge],
+    summary="Authenticate and open a session",
+)
+def login(
+    payload: LoginRequest, request: Request, response: Response
+) -> Session | TwoFactorChallenge:
     account = payload.email.lower().strip()
     ip = rate_limit.client_ip(request)
     window = settings.login_failure_window_seconds
@@ -170,7 +196,59 @@ def login(payload: LoginRequest, request: Request, response: Response) -> Sessio
         ) from exc
 
     rate_limit.reset("login_account", account)
-    return _open_session(user, response)
+
+    if user["totp_enabled"]:
+        # Password checked out, but the session stays closed until the code
+        # does too — no cookie, no access token, nothing usable yet.
+        return TwoFactorChallenge(
+            challenge_token=create_two_factor_challenge_token(user["id"])
+        )
+    return _open_session(user, request, response)
+
+
+@router.post(
+    "/2fa/login",
+    response_model=Session,
+    summary="Complete sign-in with a two-factor code",
+)
+def two_factor_login(
+    payload: TwoFactorLoginRequest, request: Request, response: Response
+) -> Session:
+    """Exchanges a login's challenge token plus a TOTP code for a real session.
+
+    The challenge token already proves the password step passed — it is
+    signed by the server and short-lived (5 minutes) — so this only has to
+    check the code.
+    """
+    try:
+        user_id = decode_two_factor_challenge_token(payload.challenge_token)
+    except (jwt.PyJWTError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "That sign-in attempt has expired. Please sign in again."
+        ) from exc
+
+    retry_after = rate_limit.check(
+        "totp_login", user_id, settings.totp_max_failures_per_account
+    )
+    if retry_after:
+        logger.warning("Rate limited 2FA login for user=%s", user_id)
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many incorrect codes. Try again shortly.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    if not totp.verify_login_code(UUID(user_id), payload.code):
+        rate_limit.record_failure(
+            "totp_login", user_id, settings.totp_failure_window_seconds
+        )
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect code.")
+    rate_limit.reset("totp_login", user_id)
+
+    user = users.get_active_user(UUID(user_id))
+    if user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This account is no longer active.")
+    return _open_session(user, request, response)
 
 
 @router.get("/me", response_model=User, summary="Return the current authenticated user")
@@ -179,6 +257,32 @@ def me(user_id=Depends(get_current_user_id)) -> User:
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This account is no longer active.")
     return User(**user)
+
+
+@router.get(
+    "/sessions",
+    response_model=list[ActiveSession],
+    summary="List this user's active sessions",
+)
+def list_sessions(request: Request, user_id=Depends(get_current_user_id)) -> list[ActiveSession]:
+    """Every device with a live (unrevoked, unexpired) refresh token.
+
+    Backs the Security page's "Active sessions" card (GAP_ANALYSIS §4.3),
+    which used to render one hardcoded row regardless of who was signed in.
+    """
+    raw = request.cookies.get(settings.refresh_cookie_name)
+    current_hash = hash_refresh_token(raw) if raw else None
+    sessions = refresh_tokens.list_active(user_id, current_token_hash=current_hash)
+    return [
+        ActiveSession(
+            id=str(s["token_id"]),
+            user_agent=s["user_agent"],
+            ip_address=s["ip_address"],
+            created_at=s["created_at"].isoformat(),
+            is_current=s["is_current"],
+        )
+        for s in sessions
+    ]
 
 
 @router.post(
@@ -199,7 +303,11 @@ def refresh(request: Request, response: Response) -> Session:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No active session.")
 
     try:
-        user_id, new_refresh = refresh_tokens.rotate(raw)
+        user_id, new_refresh = refresh_tokens.rotate(
+            raw,
+            user_agent=request.headers.get("user-agent"),
+            ip_address=rate_limit.client_ip(request),
+        )
     except refresh_tokens.InvalidRefreshTokenError as exc:
         # Clear it: keeping a cookie the server rejects means every subsequent
         # bootstrap re-attempts a token that can never work again.
@@ -274,6 +382,64 @@ def change_password(
     return MessageResponse(
         message="Password updated. Sign in again to continue."
     )
+
+
+@router.post(
+    "/2fa/setup",
+    response_model=TwoFactorSetupResponse,
+    summary="Begin two-factor enrollment",
+)
+def setup_two_factor(user: dict = Depends(get_current_user)) -> TwoFactorSetupResponse:
+    """Generates a new TOTP secret and returns it plus an otpauth:// URI for a
+    QR code. Not enabled yet — /2fa/verify confirms it."""
+    try:
+        secret, uri = totp.start_enrollment(UUID(user["id"]), user["email"])
+    except totp.TwoFactorAlreadyEnabledError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Two-factor authentication is already enabled. Disable it first to re-enroll.",
+        ) from exc
+    return TwoFactorSetupResponse(secret=secret, otpauth_url=uri)
+
+
+@router.post(
+    "/2fa/verify",
+    response_model=MessageResponse,
+    summary="Confirm two-factor enrollment with a code",
+)
+def verify_two_factor(
+    payload: TwoFactorVerifyRequest, user_id=Depends(get_current_user_id)
+) -> MessageResponse:
+    """Proves the caller saved the secret from /2fa/setup, then turns 2FA on."""
+    try:
+        totp.confirm_enrollment(user_id, payload.code)
+    except totp.InvalidCodeError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Incorrect code. Check your authenticator app and try again.",
+        ) from exc
+    return MessageResponse(message="Two-factor authentication is now enabled.")
+
+
+@router.post(
+    "/2fa/disable",
+    response_model=MessageResponse,
+    summary="Disable two-factor authentication",
+)
+def disable_two_factor(
+    payload: TwoFactorDisableRequest, user_id=Depends(get_current_user_id)
+) -> MessageResponse:
+    """Requires the account password, not just the bearer token — otherwise a
+    15-minute access token stolen from an unattended tab would be enough to
+    strip the second factor protecting the account."""
+    try:
+        users.verify_password_for(user_id, payload.password)
+    except users.InvalidCredentialsError as exc:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "Your password is incorrect."
+        ) from exc
+    totp.disable(user_id)
+    return MessageResponse(message="Two-factor authentication is now disabled.")
 
 
 @router.patch(

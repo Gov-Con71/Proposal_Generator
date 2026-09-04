@@ -83,7 +83,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # 24, not 20: jsdom@30 requires ^22.22.2 || ^24.15.0 and undici@8
+          # requires >=22.19.0. npm ci only WARNS on an engine mismatch, so on
+          # Node 20 the install succeeds and jsdom then dies at import with
+          # "webidl.util.markAsUncloneable is not a function" — zero tests run,
+          # and the failure names undici rather than the Node version.
+          node-version: "24"
           cache: npm
           cache-dependency-path: proposalai-frontend/package-lock.json
 
@@ -145,7 +150,12 @@ jobs:
           cache: pip
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # 24, not 20: jsdom@30 requires ^22.22.2 || ^24.15.0 and undici@8
+          # requires >=22.19.0. npm ci only WARNS on an engine mismatch, so on
+          # Node 20 the install succeeds and jsdom then dies at import with
+          # "webidl.util.markAsUncloneable is not a function" — zero tests run,
+          # and the failure names undici rather than the Node version.
+          node-version: "24"
           cache: npm
           cache-dependency-path: proposalai-frontend/package-lock.json
 

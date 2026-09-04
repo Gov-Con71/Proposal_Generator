@@ -52,6 +52,9 @@ const config: Config = {
       fontFamily: {
         sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],
         mono: ['var(--font-mono)', 'monospace'],
+        // Marketing display face. Georgia is the fallback because its metrics
+        // are close enough that a font swap doesn't reflow the headlines.
+        display: ['var(--font-display)', 'Georgia', 'serif'],
       },
     },
   },

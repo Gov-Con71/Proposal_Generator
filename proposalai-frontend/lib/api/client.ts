@@ -74,10 +74,10 @@ export async function bootstrapSession(): Promise<void> {
   }
 }
 
-// A 401 from these means "wrong credentials" or "refresh rejected", not
-// "session expired" — retrying or redirecting would swallow the error the
-// sign-in form needs to display.
-const NON_REFRESHABLE = ['/auth/login', '/auth/register', '/auth/refresh']
+// A 401 from these means "wrong credentials", "wrong 2FA code", or "refresh
+// rejected", not "session expired" — retrying or redirecting would swallow
+// the error the sign-in form needs to display.
+const NON_REFRESHABLE = ['/auth/login', '/auth/register', '/auth/refresh', '/auth/2fa/login']
 
 apiClient.interceptors.response.use(
   (response) => response,

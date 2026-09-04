@@ -94,13 +94,20 @@ export function useCompliance(proposalId: string) {
 }
 
 // ─── use-profile.ts ───────────────────────────────────────────────────────────
-import { profileApi } from '@/lib/api'
+import { authApi, profileApi } from '@/lib/api'
 import type { CompanyProfile } from '@/types'
 
 export function useProfile() {
   return useQuery({
     queryKey: ['profile'],
     queryFn: profileApi.get,
+  })
+}
+
+export function useActiveSessions() {
+  return useQuery({
+    queryKey: ['sessions'],
+    queryFn: authApi.getSessions,
   })
 }
 
