@@ -35,6 +35,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.services import drafting_runs
+
 from app.core import cache
 from app.core import logging as applog
 from app.core.config import settings
@@ -895,11 +897,10 @@ def _save_section_node(state: DraftingState) -> DraftingState:
     # the workspace renders both, and until now got a hardcoded 0.0 and [].
     # A guardrail-rejected section has no citations, which correctly scores 0.
     citations = section.get("citations") or []
-    section_id = docs.insert_proposal_section(
-        proposal_id=UUID(state["proposal_id"]),
+    payload = dict(
         section_title=section["title"],
         content=content or "",
-        requirement_id=UUID(primary_req) if primary_req else None,
+        requirement_id=str(primary_req) if primary_req else None,
         status=status,
         review_notes=review_notes,
         confidence=grounding_confidence(citations) if content else 0.0,
@@ -910,10 +911,11 @@ def _save_section_node(state: DraftingState) -> DraftingState:
         # sequence once concurrent completion times are involved.
         sort_order=section.get("sort_order", 0),
     )
+    section_id = drafting_runs.stage(state["run_id"], section.get("sort_order", 0), payload)
     _record_trajectory(
         state,
         section=section,
-        section_id=section_id,
+        section_id=None,  # linked after the staged revision is published
         content=content,
     )
     return {**state, "section_id": str(section_id)}
@@ -994,7 +996,7 @@ def _get_graph():
 # Public entry points
 # ---------------------------------------------------------------------------
 
-async def run_drafting(proposal_id: UUID, retrieval_filters: Optional[dict] = None) -> dict:
+async def run_drafting(proposal_id: UUID, retrieval_filters: Optional[dict] = None, run_id: str | None = None) -> dict:
     """Drafts one proposal. Returns a summary of saved sections.
 
     Addressed by **proposal**, not by RFP: sections are the proposal's own work
@@ -1018,11 +1020,13 @@ async def run_drafting(proposal_id: UUID, retrieval_filters: Optional[dict] = No
     """
     proposal = UUID(str(proposal_id))
     rfp = proposals_service.rfp_for_proposal_unscoped(proposal)
-    proposals_service.set_drafting_status(proposal, "drafting")
     # One id per invocation, shared by every section drafted in it — not
     # Celery's task_id, since this also runs directly in tests/outside Celery.
     # Groups a run's drafting_trajectories rows; see DraftingState.run_id.
-    run_id = applog.new_request_id()
+    managed = run_id is not None
+    run_id = run_id or drafting_runs.create(proposal)
+    if not drafting_runs.start(run_id, proposal):
+        return {"sections": 0, "section_ids": [], "proposal_id": str(proposal), "rfp_id": str(rfp)}
     try:
         # Loading + planning are blocking (DB + one LLM call); run off the loop.
         uploaded_by, requirements, summary, profile = await asyncio.to_thread(
@@ -1039,9 +1043,10 @@ async def run_drafting(proposal_id: UUID, retrieval_filters: Optional[dict] = No
                 "cite. Fill in the company profile to ground them.",
                 rfp,
             )
-        outline = await asyncio.to_thread(
-            _plan_outline, rfp, requirements, summary, company_context
-        )
+        outline = drafting_runs.outline_for(run_id)
+        if outline is None:
+            outline = await asyncio.to_thread(_plan_outline, rfp, requirements, summary, company_context)
+            outline = drafting_runs.outline_for(run_id, outline)
 
         # Clear signal when the tenant has no past-performance to retrieve against:
         # every section will be ungrounded (generic) rather than silently so.
@@ -1061,6 +1066,9 @@ async def run_drafting(proposal_id: UUID, retrieval_filters: Optional[dict] = No
         semaphore = asyncio.Semaphore(settings.draft_max_concurrency)
 
         async def _draft_one(outline_index: int, section: dict) -> Optional[str]:
+            existing = drafting_runs.staged(run_id, outline_index)
+            if existing:
+                return existing
             # Outline position, not completion order — sections draft
             # concurrently below, so insertion order alone would not preserve
             # this. Read by _save_section_node via section["sort_order"].
@@ -1124,15 +1132,14 @@ async def run_drafting(proposal_id: UUID, retrieval_filters: Optional[dict] = No
         section_ids = await asyncio.gather(
             *(_draft_one(i, s) for i, s in enumerate(outline))
         )
+        drafting_runs.publish(run_id)
     except Exception as exc:
-        proposals_service.set_drafting_status(
-            proposal, "draft_failed", docs.failure_reason(exc)
-        )
+        if not managed:
+            drafting_runs.fail(run_id, docs.failure_reason(exc))
         logger.exception("drafting failed for proposal=%s rfp=%s", proposal, rfp)
         raise
 
     saved = [sid for sid in section_ids if sid]
-    proposals_service.set_drafting_status(proposal, "drafted")
     # The agent writes sections straight to the DB, so it must evict what the
     # API cached on the tenant's behalf — the workspace polls sections while
     # drafting runs, so an empty list is cached long before the first save
@@ -1148,6 +1155,6 @@ async def run_drafting(proposal_id: UUID, retrieval_filters: Optional[dict] = No
     }
 
 
-def run_drafting_sync(proposal_id: UUID, retrieval_filters: Optional[dict] = None) -> dict:
+def run_drafting_sync(proposal_id: UUID, retrieval_filters: Optional[dict] = None, run_id: str | None = None) -> dict:
     """Synchronous wrapper (for the Celery worker / step 5)."""
-    return asyncio.run(run_drafting(UUID(str(proposal_id)), retrieval_filters=retrieval_filters))
+    return asyncio.run(run_drafting(UUID(str(proposal_id)), retrieval_filters=retrieval_filters, run_id=run_id))

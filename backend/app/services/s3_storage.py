@@ -78,3 +78,6 @@ class S3Storage:
         """Reads an S3 object fully into memory (used to stream export artifacts)."""
         obj = self.client.get_object(Bucket=self.bucket_name, Key=key)
         return obj["Body"].read()
+
+    def delete(self, key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket_name, Key=key)

@@ -12,12 +12,12 @@ resolves the job's `downloadUrl` to.
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Header
 from fastapi.responses import Response
 
 from app.core.deps import get_current_user_id, require_writer
 from app.models.contract import ExportCreateRequest, ExportJob
-from app.services import export_service, proposals_service
+from app.services import export_service, proposals_service, dispatch_service
 from app.worker.celery_app import celery_app
 
 router = APIRouter(prefix="/exports", tags=["Exports"])
@@ -25,7 +25,8 @@ router = APIRouter(prefix="/exports", tags=["Exports"])
 
 @router.post("", response_model=ExportJob, status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_writer)])
 def create_export(
-    payload: ExportCreateRequest, user_id: UUID = Depends(get_current_user_id)
+    payload: ExportCreateRequest, user_id: UUID = Depends(get_current_user_id),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
 ) -> ExportJob:
     """Creates a 'pending' job and hands rendering off to the async worker.
 
@@ -38,8 +39,11 @@ def create_export(
     if not proposals_service.exists_owned(payload.proposal_id, user_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Proposal not found.")
 
-    job = export_service.create_job(user_id, str(payload.proposal_id), payload.format)
-    celery_app.send_task("render_export", args=[job.id])
+    with dispatch_service.request(user_id, 'render_export', idempotency_key, payload.model_dump(mode='json')) as (previous, request_hash):
+        if previous:
+            return ExportJob.model_validate(previous)
+        job = export_service.create_job(user_id, str(payload.proposal_id), payload.format)
+        dispatch_service.enqueue(user_id, 'render_export', job.id, {}, job.model_dump(mode='json', by_alias=True), request_hash, idempotency_key)
     return job
 
 

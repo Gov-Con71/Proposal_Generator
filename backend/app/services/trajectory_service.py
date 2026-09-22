@@ -44,7 +44,11 @@ def record_section_trajectory(
                 INSERT INTO drafting_trajectories
                     (trajectory_id, run_id, proposal_id, section_id, section_title,
                      outline_index, attempts, final_status, stalled, attempt_count)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id, outline_index) DO UPDATE SET
+                    attempts=EXCLUDED.attempts, final_status=EXCLUDED.final_status,
+                    stalled=EXCLUDED.stalled, attempt_count=EXCLUDED.attempt_count,
+                    updated_at=now();
                 """,
                 (
                     str(trajectory_id),

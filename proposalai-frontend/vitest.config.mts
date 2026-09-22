@@ -12,6 +12,7 @@ export default defineConfig({
   esbuild: { jsx: 'automatic' },
   test: {
     environment: 'jsdom',
+    environmentOptions: { jsdom: { url: 'http://localhost:3000' } },
     globals: true,
     setupFiles: ['./test/setup.ts'],
     // Unit/integration only. Playwright specs live in e2e/ and are driven by

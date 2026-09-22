@@ -15,7 +15,7 @@ from uuid import UUID
 
 from psycopg2.extras import Json, RealDictCursor
 
-from app.core.db import get_connection
+from app.core.db import get_connection, transaction
 from app.models.contract import ProposalSection, Requirement
 
 logger = logging.getLogger(__name__)
@@ -272,7 +272,7 @@ def _section_row(section_id: UUID, user_id: UUID) -> dict:
     row = _fetchone(
         "SELECT s.section_id, s.proposal_id, s.requirement_id, s.section_title, "
         "s.generated_draft_content, s.status, s.review_notes, s.created_at, s.updated_at, "
-        "p.owned_by "
+        "s.ai_confidence_score, s.reference_tags, p.owned_by "
         "FROM proposal_sections s JOIN proposals p ON p.proposal_id = s.proposal_id "
         "WHERE s.section_id = %s;",
         (str(section_id),),
@@ -293,6 +293,19 @@ def create_section(
     conn = get_connection()
     try:
         with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Lock the proposal while validating its document relationship.
+            cur.execute("SELECT rfp_id FROM proposals WHERE proposal_id=%s AND owned_by=%s FOR UPDATE", (str(proposal_id), str(user_id)))
+            proposal = cur.fetchone()
+            if proposal is None:
+                raise NotFoundError("Proposal not found")
+            if requirement_id is not None:
+                cur.execute(
+                    "SELECT 1 FROM extracted_requirements r JOIN rfp_documents d USING (rfp_id) "
+                    "WHERE r.requirement_id=%s AND r.rfp_id=%s AND d.uploaded_by=%s",
+                    (str(requirement_id), proposal['rfp_id'], str(user_id)),
+                )
+                if cur.fetchone() is None:
+                    raise NotFoundError("Requirement not found")
             cur.execute(
                 "INSERT INTO proposal_sections "
                 "(proposal_id, requirement_id, section_title, status, sort_order) "
@@ -303,7 +316,7 @@ def create_section(
                 "COALESCE((SELECT MAX(sort_order) FROM proposal_sections "
                 "WHERE proposal_id = %s), -1) + 1) "
                 f"RETURNING {_SECTION_COLS};",
-                (str(proposal_id), requirement_id, title, str(proposal_id)),
+                (str(proposal_id), str(requirement_id) if requirement_id else None, title, str(proposal_id)),
             )
             row = cur.fetchone()
     finally:
@@ -312,7 +325,7 @@ def create_section(
 
 
 def update_section(section_id: UUID, user_id: UUID, content: str | None, status: str | None) -> ProposalSection:
-    _section_row(section_id, user_id)  # ownership check
+    owned = _section_row(section_id, user_id)
     fields, values = [], []
     if content is not None:
         fields.append("generated_draft_content = %s")
@@ -323,7 +336,9 @@ def update_section(section_id: UUID, user_id: UUID, content: str | None, status:
     conn = get_connection()
     try:
         with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute('SELECT proposal_id FROM proposals WHERE proposal_id=%s FOR UPDATE', (owned['proposal_id'],))
             if fields:
+                fields.append('user_modified = TRUE')
                 cur.execute(
                     f"UPDATE proposal_sections SET {', '.join(fields)}, updated_at = NOW() "
                     "WHERE section_id = %s;",
@@ -336,6 +351,8 @@ def update_section(section_id: UUID, user_id: UUID, content: str | None, status:
             row = cur.fetchone()
     finally:
         conn.close()
+    if row is None:
+        raise NotFoundError('Section no longer exists')
     return _to_section(row)
 
 
@@ -354,9 +371,12 @@ def save_generated_draft(
     conn = get_connection()
     try:
         with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute('SELECT p.proposal_id FROM proposals p JOIN proposal_sections s ON s.proposal_id=p.proposal_id WHERE s.section_id=%s FOR UPDATE OF p', (str(section_id),))
+            if cur.fetchone() is None:
+                raise NotFoundError('Section no longer exists')
             cur.execute(
                 "UPDATE proposal_sections SET generated_draft_content = %s, status = 'draft', "
-                "ai_confidence_score = %s, reference_tags = %s, "
+                "ai_confidence_score = %s, reference_tags = %s, user_modified = TRUE, "
                 f"updated_at = NOW() WHERE section_id = %s RETURNING {_SECTION_COLS};",
                 (content, confidence, Json(reference_tags or []), str(section_id)),
             )
@@ -366,13 +386,16 @@ def save_generated_draft(
     return _to_section(row)
 
 
-def requirement_text_for_section(section_id: UUID) -> str:
+def requirement_text_for_section(section_id: UUID, user_id: UUID) -> str:
     """Returns the mapped requirement's text (or the section title as a fallback)."""
     row = _fetchone(
         "SELECT s.section_title, r.raw_text_content FROM proposal_sections s "
+        "JOIN proposals p ON p.proposal_id=s.proposal_id "
         "LEFT JOIN extracted_requirements r ON r.requirement_id = s.requirement_id "
-        "WHERE s.section_id = %s;",
-        (str(section_id),),
+        "LEFT JOIN rfp_documents d ON d.rfp_id=r.rfp_id "
+        "WHERE s.section_id = %s AND p.owned_by=%s "
+        "AND (s.requirement_id IS NULL OR (r.rfp_id=p.rfp_id AND d.uploaded_by=p.owned_by));",
+        (str(section_id), str(user_id)),
     )
     if row is None:
         raise NotFoundError(f"section {section_id}")

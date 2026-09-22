@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import QRCode from 'qrcode'
+import Image from 'next/image'
 import { Card, Skeleton } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -267,7 +268,7 @@ function TwoFactorCard() {
           <p className="text-xs text-[var(--text-secondary)]">
             Scan this with your authenticator app (Google Authenticator, Authy, 1Password…), or enter the code manually.
           </p>
-          <img src={setup.qrDataUrl} alt="2FA QR code" className="w-36 h-36 rounded-lg border border-[var(--border-subtle)]" />
+          <Image unoptimized width={144} height={144} src={setup.qrDataUrl} alt="2FA QR code" className="w-36 h-36 rounded-lg border border-[var(--border-subtle)]" />
           <p className="text-[10px] font-mono tracking-wider text-[var(--text-tertiary)] break-all">{setup.secret}</p>
           <Input
             label="6-digit code" value={code}

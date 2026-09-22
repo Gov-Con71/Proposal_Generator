@@ -2,6 +2,14 @@ import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
 import { afterEach, beforeEach, vi } from 'vitest'
 
+// Node 25+ exposes a native storage getter even when no storage file is
+// configured. Vitest 2 preserves that global instead of copying jsdom's.
+// Vitest exposes the underlying jsdom instance; window itself aliases the
+// test global, so use the instance to reach the browser's Storage objects.
+declare const jsdom: { window: Window }
+Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: jsdom.window.localStorage })
+Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: jsdom.window.sessionStorage })
+
 // The API base the code reads at module load.
 process.env.NEXT_PUBLIC_API_URL = 'http://api.test'
 

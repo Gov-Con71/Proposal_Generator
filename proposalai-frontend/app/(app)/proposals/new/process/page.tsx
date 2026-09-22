@@ -165,10 +165,10 @@ export default function ProcessPage({ searchParams }: { searchParams: Promise<{ 
                 key={i}
                 className="absolute w-1 h-1 bg-white rounded-full opacity-40"
                 style={{
-                  left: `${Math.random() * 100}%`,
-                  top:  `${Math.random() * 100}%`,
-                  animation: `pulse ${1 + Math.random() * 2}s ease-in-out infinite`,
-                  animationDelay: `${Math.random()}s`,
+                  left: `${(i * 37 + 11) % 100}%`,
+                  top:  `${(i * 61 + 23) % 100}%`,
+                  animation: `pulse ${1 + (i % 5) / 2}s ease-in-out infinite`,
+                  animationDelay: `${(i % 7) / 7}s`,
                 }}
               />
             ))}

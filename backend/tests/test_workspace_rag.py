@@ -226,7 +226,7 @@ def test_generate_section_uses_draft_writer(monkeypatch, test_client, proposal_w
     monkeypatch.setattr(
         wsapi.draft_writer,
         "generate_draft",
-        lambda uid, text, top_k=5: {"content": "Our proven approach…", "citations": []},
+        lambda uid, text, top_k=5, **kwargs: {"content": "Our proven approach…", "citations": []},
     )
 
     proposal_id = proposal_with_requirements["proposal_id"]
@@ -262,7 +262,7 @@ def test_two_proposals_on_one_rfp_keep_separate_sections(
     monkeypatch.setattr(
         wsapi.draft_writer,
         "generate_draft",
-        lambda uid, text, top_k=5: {"content": "First bid's approach.", "citations": []},
+        lambda uid, text, top_k=5, **kwargs: {"content": "First bid's approach.", "citations": []},
     )
 
     user_id = proposal_with_requirements["user_id"]
@@ -331,7 +331,12 @@ def test_queueing_a_draft_marks_only_that_proposal(
     body = resp.json()
     assert body["draftingStatus"] == "drafting"
     assert body["proposalId"] == first
-    assert queued == [("draft_proposal", [first])]
+    assert queued == []
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute('SELECT operation,status FROM dispatch_jobs WHERE entity_id=%s', (first,))
+        assert cur.fetchone() == ('draft_proposal', 'queued')
+    conn.close()
 
     assert test_client.get(f"/proposals/{first}", headers=auth).json()["draftingStatus"] == "drafting"
     # The competing bid is untouched, and so is the document behind both.
@@ -365,9 +370,14 @@ def test_draft_endpoint_accepts_an_optional_retrieval_filter_body(
         headers=auth,
     )
     assert resp.status_code == 202, resp.text
-    name, args, kwargs = queued[0]
-    assert args == [proposal_id]
-    assert kwargs == {"retrieval_filters": {"outcome": "won", "industry": "Marine Engineering"}}
+    assert queued == []
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute('SELECT payload FROM dispatch_jobs WHERE entity_id=%s', (proposal_id,))
+        payload = cur.fetchone()[0]
+    conn.close()
+    assert payload['retrieval_filters'] == {'outcome': 'won', 'industry': 'Marine Engineering'}
+    assert payload['run_id']
 
 
 def test_drafting_a_proposal_with_no_requirements_is_a_409(

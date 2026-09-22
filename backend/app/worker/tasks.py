@@ -116,3 +116,9 @@ def render_export(self, job_id: str) -> dict:
             extra={"job_id": job_id, "retries": self.request.retries},
         )
         raise self.retry(exc=exc)
+
+
+@celery_app.task(name='execute_dispatch_job', acks_late=True, reject_on_worker_lost=True)
+def execute_dispatch_job(job_id: str) -> dict:
+    from app.services.dispatch_service import execute
+    return execute(job_id)

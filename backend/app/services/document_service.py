@@ -229,6 +229,8 @@ def insert_proposal_section(
     confidence: float = 0.0,
     reference_tags: list[str] | None = None,
     sort_order: int = 0,
+    section_id: UUID | None = None,
+    generated_run_id: str | None = None,
 ) -> UUID:
     """Inserts one drafted proposal section and returns its id.
 
@@ -253,7 +255,7 @@ def insert_proposal_section(
     default and instead append via workspace_service.create_section's
     MAX(sort_order)+1, so a hand-added section doesn't jump ahead of drafted ones.
     """
-    section_id = uuid4()
+    section_id = section_id or uuid4()
     conn = get_connection()
     try:
         with conn, conn.cursor() as cur:
@@ -262,8 +264,8 @@ def insert_proposal_section(
                 INSERT INTO proposal_sections
                     (section_id, proposal_id, requirement_id, section_title,
                      generated_draft_content, status, review_notes,
-                     ai_confidence_score, reference_tags, sort_order)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                     ai_confidence_score, reference_tags, sort_order, generated_run_id, user_modified)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
                 """,
                 (
                     str(section_id),
@@ -276,6 +278,8 @@ def insert_proposal_section(
                     confidence,
                     Json(reference_tags or []),
                     sort_order,
+                    str(generated_run_id) if generated_run_id else None,
+                    generated_run_id is None,
                 ),
             )
     finally:
