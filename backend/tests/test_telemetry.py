@@ -72,3 +72,21 @@ def test_missing_usage_metadata_is_safe(fake_redis):
     telemetry.record_response("gemini-2.0-flash", types.SimpleNamespace(), telemetry.now())
     snap = telemetry.metrics_snapshot()
     assert snap["by_model"]["gemini-2.0-flash"]["tokens_in"] == 0
+
+
+def test_priced_flag_distinguishes_a_real_zero_from_an_unpriced_model(fake_redis):
+    """A Featherless model (genuinely flat-rate, $0 marginal cost) and a model
+    with no _PRICES entry at all both report est_cost_usd == 0.0 — priced must
+    be the only thing telling those two cases apart."""
+    telemetry.record_response("Qwen/Qwen2.5-7B-Instruct", _response(1000, 500), telemetry.now())
+    telemetry.record_response("some-new-unpriced-model", _response(1000, 500), telemetry.now())
+
+    snap = telemetry.metrics_snapshot()
+    known_zero = snap["by_model"]["Qwen/Qwen2.5-7B-Instruct"]
+    unknown = snap["by_model"]["some-new-unpriced-model"]
+
+    assert known_zero["est_cost_usd"] == 0.0
+    assert known_zero["priced"] is True
+
+    assert unknown["est_cost_usd"] == 0.0
+    assert unknown["priced"] is False

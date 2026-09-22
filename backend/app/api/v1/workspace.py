@@ -16,9 +16,10 @@ import logging
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status, Header
 
 from app.core import cache
+from app.services import dispatch_service, drafting_runs
 from app.core.deps import get_current_user_id, require_writer
 from app.models.contract import (
     CamelModel,
@@ -31,7 +32,7 @@ from app.models.contract import (
     SectionUpdate,
 )
 from app.services import document_service as docs
-from app.services import draft_writer, proposals_service, workspace_service as ws
+from app.services import draft_writer, proposals_service, trajectory_service, workspace_service as ws
 from app.worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,28 @@ class DraftQueuedResponse(CamelModel):
     # status — see migration 0005.
     drafting_status: str
     requirements_count: int
+
+
+class SectionTrajectory(CamelModel):
+    """One section's full attempt history for a drafting run.
+
+    Unlike `ProposalSection.reviewNotes` (the critic's *latest* feedback only),
+    `attempts` is every round in order — see migration 0016.
+    """
+
+    section_id: Optional[str] = None
+    section_title: str
+    outline_index: int
+    final_status: Optional[str] = None
+    stalled: bool
+    attempt_count: int
+    attempts: list[dict]
+
+
+class DraftingTrajectoryResponse(CamelModel):
+    run_id: str
+    proposal_id: str
+    sections: list[SectionTrajectory]
 
 
 def _guard(fn, *args):
@@ -182,9 +205,9 @@ def approve_section(section_id: UUID, user_id: UUID = Depends(get_current_user_i
 @router.post("/sections/{section_id}/regenerate", response_model=ProposalSection, dependencies=[Depends(require_writer)])
 def regenerate_section(section_id: UUID, user_id: UUID = Depends(get_current_user_id)):
     """Re-runs the RAG draft writer for an existing section."""
-    _guard(ws.get_section, section_id, user_id)  # ownership check
-    requirement_text = ws.requirement_text_for_section(section_id)
-    result = draft_writer.generate_draft(user_id, requirement_text)
+    owned = _guard(ws.get_section, section_id, user_id)
+    requirement_text = _guard(ws.requirement_text_for_section, section_id, user_id)
+    result = draft_writer.generate_draft(user_id, requirement_text, proposal_id=UUID(owned.proposal_id))
     section = ws.save_generated_draft(section_id, result["content"], *_grounding(result))
     _invalidate_sections(user_id, section)
     return section
@@ -201,6 +224,7 @@ def draft_proposal(
     proposal_id: UUID,
     payload: Optional[DraftRequest] = None,
     user_id: UUID = Depends(get_current_user_id),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
 ) -> DraftQueuedResponse:
     """Queues the drafting agent for one proposal.
 
@@ -232,7 +256,6 @@ def draft_proposal(
     # picking the job up, a client polling for 'drafting' would otherwise read
     # the previous run's 'drafted' and stop, concluding instantly that a draft
     # it just requested was already finished.
-    proposals_service.set_drafting_status(proposal_id, "drafting")
     # Authorised here, before queueing: the worker resolves the proposal without
     # a tenant check because it has no request identity. Filters go through
     # kwargs, not args, so the common (unfiltered) call's args stay exactly
@@ -250,17 +273,50 @@ def draft_proposal(
         if payload
         else {}
     )
-    celery_app.send_task(
-        "draft_proposal",
-        args=[str(proposal_id)],
-        kwargs={"retrieval_filters": retrieval_filters} if retrieval_filters else {},
-    )
-    return DraftQueuedResponse(
-        proposal_id=str(proposal_id),
-        rfp_id=str(rfp_id),
-        drafting_status="drafting",
-        requirements_count=requirements_count,
-    )
+    try:
+        with dispatch_service.request(user_id, 'draft_proposal', idempotency_key, {'proposal_id': str(proposal_id), 'filters': retrieval_filters}) as (previous, request_hash):
+            if previous:
+                return DraftQueuedResponse.model_validate(previous)
+            run_id = drafting_runs.create(proposal_id)
+            response = DraftQueuedResponse(proposal_id=str(proposal_id), rfp_id=str(rfp_id),
+                                           drafting_status='drafting', requirements_count=requirements_count)
+            dispatch_service.enqueue(user_id, 'draft_proposal', proposal_id,
+                                     {'run_id': run_id, 'retrieval_filters': retrieval_filters},
+                                     response.model_dump(mode='json', by_alias=True), request_hash, idempotency_key)
+        return response
+    except drafting_runs.DraftConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.get(
+    "/proposals/{proposal_id}/drafting/trajectory",
+    response_model=DraftingTrajectoryResponse,
+    summary="Get the per-attempt trajectory of a drafting run (debugging)",
+)
+def get_drafting_trajectory(
+    proposal_id: UUID,
+    run_id: Optional[UUID] = None,
+    user_id: UUID = Depends(get_current_user_id),
+) -> DraftingTrajectoryResponse:
+    """Every section's full draft/critic attempt history for one drafting run.
+
+    `run_id` omitted resolves to the proposal's most recent run. Unlike
+    `GET /sections`, which only ever shows the final saved content and the
+    critic's latest feedback, this surfaces every revision round — what was
+    drafted, what the critic flagged, and whether the loop stalled — for
+    diagnosing why a section needed review or never saved at all.
+    """
+    try:
+        proposals_service.get_proposal(proposal_id, user_id)
+    except proposals_service.NotFoundError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found.") from exc
+
+    trajectory = trajectory_service.get_trajectory(proposal_id, run_id)
+    if trajectory is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "No drafting run recorded for this proposal."
+        )
+    return DraftingTrajectoryResponse.model_validate(trajectory)
 
 
 @router.post(
@@ -284,7 +340,7 @@ def generate_section(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Requirement not found.")
     title = payload.title or f"Response to {match.section or 'requirement'}"
     section = ws.create_section(proposal_id, user_id, title, payload.requirement_id)
-    result = draft_writer.generate_draft(user_id, match.text)
+    result = draft_writer.generate_draft(user_id, match.text, proposal_id=proposal_id)
     section = ws.save_generated_draft(UUID(section.id), result["content"], *_grounding(result))
     _invalidate_sections(user_id, section)
     return section

@@ -9,10 +9,11 @@ Mounted without the /api/v1 prefix so paths match the frontend client
 """
 
 import logging
+import hashlib
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status, Header
 
 from app.core.config import settings
 from app.core.deps import get_current_user_id, require_writer
@@ -22,6 +23,7 @@ from app.services import proposals_service as proposals
 from app.services.s3_storage import S3Storage
 from app.services.solicitation_extractor import SolicitationSummary
 from app.worker.celery_app import celery_app
+from app.services import dispatch_service
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +83,7 @@ def _spooled_size(upload: UploadFile) -> int:
     summary="Upload an RFP document, store it in S3, and queue ingestion",
     dependencies=[Depends(require_writer)],
 )
-async def upload_document(
+def upload_document(
     file: UploadFile = File(..., description="RFP file (PDF, DOCX, or TXT)."),
     # Bid metadata the upload form collects. Sent as multipart fields alongside
     # the file, because the request is already multipart — a JSON body would
@@ -96,6 +98,7 @@ async def upload_document(
     contract_type: str = Form(""),
     naics_code: str = Form(""),
     uploaded_by: UUID = Depends(get_current_user_id),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
 ) -> DocumentUploadResponse:
     # --- validate type (2.1 error-boundary contract) ---
     suffix = Path(file.filename or "").suffix.lower()
@@ -115,57 +118,46 @@ async def upload_document(
             detail=f"File exceeds the {settings.max_upload_bytes // (1024 * 1024)}MB limit.",
         )
 
-    # --- tenant-isolated S3 key: uploads/{user}/{rfp}/{filename} ---
-    rfp_id = uuid4()
-    safe_name = Path(file.filename or "document.pdf").name
-    s3_key = f"uploads/{uploaded_by}/{rfp_id}/{safe_name}"
-
-    try:
-        S3Storage().stream_upload(s3_key, file.file, file.content_type)
-    except Exception as exc:  # noqa: BLE001 — surface storage failures cleanly
-        logger.exception("S3 upload failed for key %s", s3_key)
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY, f"Storage upload failed: {exc}"
-        ) from exc
-
-    # --- persist row (reuse the app-generated id so key + row agree) ---
-    try:
-        created_id = docs.create_rfp_document(uploaded_by, safe_name, s3_key)
-    except docs.UnknownUploaderError as exc:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Unknown uploader '{uploaded_by}' — user does not exist.",
-        ) from exc
-
-    # --- create the proposal this upload is for ---
-    # Uploading an RFP is how a proposal starts, so one is created here rather
-    # than leaving an orphan document the dashboard can never show. Whatever the
-    # user typed on the upload form wins; the filename is only a fallback title,
-    # and ingestion fills the rest in from the document.
-    proposal = proposals.create_proposal(
-        uploaded_by,
-        ProposalCreate(
-            title=title.strip() or Path(safe_name).stem,
-            agency=agency.strip(),
-            solicitation_number=solicitation_number.strip(),
-            due_date=due_date.strip(),
-            contract_type=contract_type.strip(),
-            naics_code=naics_code.strip(),
-            document_id=str(created_id),
-        ),
+    metadata = ProposalCreate(
+        title=title.strip() or Path(file.filename).stem, agency=agency.strip(),
+        solicitation_number=solicitation_number.strip(), due_date=due_date.strip(),
+        contract_type=contract_type.strip(), naics_code=naics_code.strip(),
     )
-
-    # --- hand off to the async worker queue (by name; worker owns the LLM stack) ---
-    celery_app.send_task("ingest_document", args=[str(created_id)])
-
-    return DocumentUploadResponse(
-        proposal_id=proposal.id,
-        rfp_id=str(created_id),
-        file_name=safe_name,
-        size_bytes=size,
-        s3_key=s3_key,
-        processing_status="pending",
-    )
+    digest = hashlib.sha256()
+    while chunk := file.file.read(1024 * 1024):
+        digest.update(chunk)
+    file.file.seek(0)
+    request_data = {'file': digest.hexdigest(), 'filename': file.filename, **metadata.model_dump(mode='json')}
+    uploaded_key = None
+    try:
+        with dispatch_service.request(uploaded_by, 'ingest_document', idempotency_key, request_data) as (previous, request_hash):
+            if previous:
+                return DocumentUploadResponse.model_validate(previous)
+            safe_name = Path(file.filename or 'document.pdf').name
+            s3_key = f"uploads/{uploaded_by}/{uuid4()}/{safe_name}"
+            try:
+                S3Storage().stream_upload(s3_key, file.file, file.content_type)
+                uploaded_key = s3_key
+            except Exception as exc:
+                logger.exception('Storage upload failed')
+                raise HTTPException(502, 'Storage upload failed. Please retry.') from exc
+            created_id = docs.create_rfp_document(uploaded_by, safe_name, s3_key)
+            metadata.document_id = str(created_id)
+            proposal = proposals.create_proposal(uploaded_by, metadata)
+            response = DocumentUploadResponse(
+                proposal_id=proposal.id, rfp_id=str(created_id), file_name=safe_name,
+                size_bytes=size, s3_key=s3_key, processing_status='pending',
+            )
+            dispatch_service.enqueue(uploaded_by, 'ingest_document', created_id, {},
+                                     response.model_dump(mode='json', by_alias=True), request_hash, idempotency_key)
+        return response
+    except Exception:
+        if uploaded_key:
+            try:
+                S3Storage().delete(uploaded_key)
+            except Exception:
+                logger.exception('Orphan upload requires cleanup: %s', uploaded_key)
+        raise
 
 
 @router.get(
@@ -218,20 +210,17 @@ def read_solicitation_summary(
     dependencies=[Depends(require_writer)],
 )
 def reanalyze(
-    rfp_id: UUID, uploaded_by: UUID = Depends(get_current_user_id)
+    rfp_id: UUID, uploaded_by: UUID = Depends(get_current_user_id),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
 ) -> DocumentStatusResponse:
     document = _owned_document_or_404(rfp_id, uploaded_by)
-    docs.update_status(rfp_id, "pending")
-    celery_app.send_task("ingest_document", args=[str(rfp_id)])
-    return DocumentStatusResponse(
-        rfp_id=str(rfp_id),
-        file_name=document["file_name"],
-        processing_status="pending",
-        requirements_count=docs.count_requirements(rfp_id),
-    )
-
-
-# The drafting route moved to POST /proposals/{proposal_id}/draft (workspace.py)
-# when sections were re-keyed to the proposal. Drafting produces a proposal's own
-# sections, so it has to be told which proposal it is drafting — an rfp_id no
-# longer identifies that unambiguously.
+    with dispatch_service.request(uploaded_by, 'ingest_document', idempotency_key, {'reanalyze': str(rfp_id)}) as (previous, request_hash):
+        if previous:
+            return DocumentStatusResponse.model_validate(previous)
+        docs.update_status(rfp_id, "pending")
+        response = DocumentStatusResponse(
+            rfp_id=str(rfp_id), file_name=document['file_name'], processing_status='pending',
+            requirements_count=docs.count_requirements(rfp_id),
+        )
+        dispatch_service.enqueue(uploaded_by, 'ingest_document', rfp_id, {}, response.model_dump(mode='json', by_alias=True), request_hash, idempotency_key)
+    return response

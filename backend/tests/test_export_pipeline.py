@@ -184,7 +184,12 @@ def test_export_lifecycle_all_formats(test_client, seeded_proposal, capture_enqu
         job = resp.json()
         assert job["status"] == "pending"
         assert job["downloadUrl"] is None
-        assert capture_enqueue[-1] == ("render_export", job["id"])
+        assert capture_enqueue == []
+        conn = psycopg2.connect(settings.database_url)
+        with conn.cursor() as cur:
+            cur.execute('SELECT operation,status FROM dispatch_jobs WHERE entity_id=%s', (job['id'],))
+            assert cur.fetchone() == ('render_export', 'queued')
+        conn.close()
 
         # download before the worker runs -> 404
         assert test_client.get(f"/exports/{job['id']}/download", headers=auth).status_code == 404

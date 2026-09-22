@@ -176,7 +176,12 @@ def test_upload_to_requirements_end_to_end(test_client, seeded_user, monkeypatch
     assert body["sizeBytes"] == len(payload)
     assert body["processingStatus"] == "pending"
     assert body["s3Key"].startswith(f"uploads/{seeded_user}/")
-    assert enqueued == [rfp_id]
+    assert enqueued == []  # broker handoff belongs to the dispatcher
+    conn = psycopg2.connect(settings.database_url)
+    with conn.cursor() as cur:
+        cur.execute("SELECT operation, status FROM dispatch_jobs WHERE entity_id=%s", (rfp_id,))
+        assert cur.fetchone() == ('ingest_document', 'queued')
+    conn.close()
 
     # --- Story 2.5: run the worker's job (own thread/loop, as in production) ---
     count = ingestion.run_ingestion_sync(rfp_id)

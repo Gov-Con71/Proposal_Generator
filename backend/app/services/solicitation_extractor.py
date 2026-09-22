@@ -173,7 +173,13 @@ def _call_extractor(markdown_text: str) -> SolicitationSummary:
     from app.services.extraction_input import guard_extraction_input
 
     document = guard_extraction_input(markdown_text, label="solicitation extraction")
-    return get_llm().generate_structured(
+    # "light" tier: same shape of task as compliance_extractor's — literal,
+    # cited, schema-constrained extraction, explicitly told not to infer or
+    # extrapolate (see _SYSTEM_PROMPT) — and it runs concurrently against the
+    # same document (ingestion.py's asyncio.gather), so there is no reason this
+    # one call should cost more than that one. Falls back to the main model
+    # when LLM_MODEL_LIGHT is unset, same no-op-by-default behaviour as there.
+    return get_llm(tier="light").generate_structured(
         f"DOCUMENT TEXT:\n{document}",
         SolicitationSummary,
         system=_SYSTEM_PROMPT,

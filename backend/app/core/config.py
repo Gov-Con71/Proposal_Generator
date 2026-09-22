@@ -22,6 +22,21 @@ class Settings(BaseSettings):
     # chat model id (e.g. Qwen/Qwen2.5-72B-Instruct), EMBEDDING_MODEL to an
     # embedding model (e.g. Qwen/Qwen3-Embedding-8B), and FEATHERLESS_API_KEY.
     llm_provider: str = Field(default="gemini", validation_alias="LLM_PROVIDER")
+    # Overrides llm_provider for the "light" tier only. Empty (default) means
+    # the light tier runs on the same provider as the default tier, same as
+    # before this setting existed — set it to run light-tier work (HyDE,
+    # compliance-matrix structuring) on a different backend entirely (e.g. a
+    # free/local model) while the default tier stays on a paid vendor.
+    llm_provider_light: str = Field(default="", validation_alias="LLM_PROVIDER_LIGHT")
+    # For LLM_PROVIDER=openai_compatible: any OpenAI-compatible host's base URL
+    # (e.g. https://openrouter.ai/api/v1, or a self-hosted vLLM/Ollama
+    # endpoint's /v1). Unused by "gemini"/"featherless", which hardcode their
+    # own hosts.
+    llm_base_url: str = Field(default="", validation_alias="LLM_BASE_URL")
+    # For LLM_PROVIDER=openai_compatible: the API key for LLM_BASE_URL.
+    # "gemini"/"featherless" use their own vendor-named keys instead
+    # (GEMINI_API_KEY/FEATHERLESS_API_KEY) so existing .env files keep working.
+    llm_api_key: str = Field(default="", validation_alias="LLM_API_KEY")
     # Declared here so the keys load from .env like every other setting. The
     # adapters read os.getenv directly, which only ever sees *real* environment
     # variables — pydantic's env_file populates Settings without exporting into

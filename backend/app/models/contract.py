@@ -246,7 +246,7 @@ class RequirementUpdate(CamelModel):
 
 class SectionCreate(CamelModel):
     title: str
-    requirement_id: Optional[str] = None
+    requirement_id: Optional[UUID] = None
 
 
 class SectionUpdate(CamelModel):

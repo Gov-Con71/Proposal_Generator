@@ -588,13 +588,15 @@ def generate_draft(
     requirement_text: str,
     top_k: int = 5,
     retrieval_filters: Optional[dict] = None,
+    *,
+    proposal_id: UUID | None = None,
 ) -> dict:
     """Retrieves context and generates a draft. Returns the prose + citations.
 
     `retrieval_filters` — see `retrieval.search_similar` — defaults to no
     filtering, unchanged from before this existed.
     """
-    context = search_similar(uploaded_by, requirement_text, top_k=top_k, **(retrieval_filters or {}))
+    context = search_similar(uploaded_by, requirement_text, top_k=top_k, proposal_id=proposal_id, **(retrieval_filters or {}))
     prompt = _assemble_prompt(requirement_text, context)
 
     text = get_llm().generate_text(prompt, system=_SYSTEM_PROMPT)

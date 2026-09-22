@@ -68,6 +68,13 @@ _proposal_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _task_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "task_id", default=None
 )
+# One drafting_agent.run_drafting() invocation — see DraftingState.run_id and
+# migration 0016 (drafting_trajectories). Lets a section's ordinary log lines
+# be grepped by the same id its trajectory row is keyed on, without threading
+# it through every logger.info call by hand.
+_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "run_id", default=None
+)
 
 _VARS = {
     "request_id": _request_id,
@@ -75,6 +82,7 @@ _VARS = {
     "rfp_id": _rfp_id,
     "proposal_id": _proposal_id,
     "task_id": _task_id,
+    "run_id": _run_id,
 }
 
 

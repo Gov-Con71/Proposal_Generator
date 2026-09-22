@@ -144,6 +144,15 @@ export function useProcessing(proposalId: string, onComplete?: () => void) {
   const [pipeline, setPipeline] = useState<Pipeline>(IDLE_PIPELINE)
   const [connectionError, setConnectionError] = useState(false)
 
+  // Reset on a different proposal before rendering its status. This avoids
+  // showing the previous proposal's frame while a new stream is connecting.
+  const [streamProposalId, setStreamProposalId] = useState(proposalId)
+  if (streamProposalId !== proposalId) {
+    setStreamProposalId(proposalId)
+    setPipeline(IDLE_PIPELINE)
+    setConnectionError(false)
+  }
+
   // Keep the latest callback without making it an effect dependency — otherwise
   // an inline arrow from the caller would tear down the stream on every render.
   const onCompleteRef = useRef(onComplete)
@@ -151,9 +160,6 @@ export function useProcessing(proposalId: string, onComplete?: () => void) {
 
   useEffect(() => {
     if (!isValidId(proposalId)) return
-
-    setPipeline(IDLE_PIPELINE)
-    setConnectionError(false)
 
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
     let es: EventSource | null = null

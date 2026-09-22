@@ -226,7 +226,7 @@ def test_generate_section_uses_draft_writer(monkeypatch, test_client, proposal_w
     monkeypatch.setattr(
         wsapi.draft_writer,
         "generate_draft",
-        lambda uid, text, top_k=5: {"content": "Our proven approach…", "citations": []},
+        lambda uid, text, top_k=5, **kwargs: {"content": "Our proven approach…", "citations": []},
     )
 
     proposal_id = proposal_with_requirements["proposal_id"]
@@ -262,7 +262,7 @@ def test_two_proposals_on_one_rfp_keep_separate_sections(
     monkeypatch.setattr(
         wsapi.draft_writer,
         "generate_draft",
-        lambda uid, text, top_k=5: {"content": "First bid's approach.", "citations": []},
+        lambda uid, text, top_k=5, **kwargs: {"content": "First bid's approach.", "citations": []},
     )
 
     user_id = proposal_with_requirements["user_id"]
@@ -331,7 +331,12 @@ def test_queueing_a_draft_marks_only_that_proposal(
     body = resp.json()
     assert body["draftingStatus"] == "drafting"
     assert body["proposalId"] == first
-    assert queued == [("draft_proposal", [first])]
+    assert queued == []
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute('SELECT operation,status FROM dispatch_jobs WHERE entity_id=%s', (first,))
+        assert cur.fetchone() == ('draft_proposal', 'queued')
+    conn.close()
 
     assert test_client.get(f"/proposals/{first}", headers=auth).json()["draftingStatus"] == "drafting"
     # The competing bid is untouched, and so is the document behind both.
@@ -365,9 +370,14 @@ def test_draft_endpoint_accepts_an_optional_retrieval_filter_body(
         headers=auth,
     )
     assert resp.status_code == 202, resp.text
-    name, args, kwargs = queued[0]
-    assert args == [proposal_id]
-    assert kwargs == {"retrieval_filters": {"outcome": "won", "industry": "Marine Engineering"}}
+    assert queued == []
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute('SELECT payload FROM dispatch_jobs WHERE entity_id=%s', (proposal_id,))
+        payload = cur.fetchone()[0]
+    conn.close()
+    assert payload['retrieval_filters'] == {'outcome': 'won', 'industry': 'Marine Engineering'}
+    assert payload['run_id']
 
 
 def test_drafting_a_proposal_with_no_requirements_is_a_409(
@@ -393,3 +403,60 @@ def test_drafting_a_proposal_with_no_requirements_is_a_409(
     assert resp.status_code == 409
     # And nothing was left claiming to be in progress.
     assert test_client.get(f"/proposals/{proposal_id}", headers=auth).json()["draftingStatus"] == "idle"
+
+
+def test_drafting_trajectory_returns_recorded_attempts(
+    test_client, proposal_with_requirements, other_tenant
+):
+    """GET .../drafting/trajectory surfaces the full per-attempt history a real
+    drafting run would have written via trajectory_service — not just the
+    latest reviewNotes that GET .../sections exposes."""
+    from app.services import trajectory_service
+
+    proposal_id = proposal_with_requirements["proposal_id"]
+    auth = _auth(proposal_with_requirements["user_id"])
+
+    run_id = str(uuid.uuid4())
+    trajectory_service.record_section_trajectory(
+        run_id=run_id,
+        proposal_id=proposal_id,
+        section_id=None,
+        section_title="Technical Approach",
+        outline_index=0,
+        attempts=[
+            {"attempt": 1, "critic": {"addressed": False, "feedback": "Cite a contract."}},
+            {"attempt": 2, "critic": {"addressed": True, "feedback": ""}},
+        ],
+        stalled=False,
+        final_status="saved",
+    )
+
+    resp = test_client.get(f"/proposals/{proposal_id}/drafting/trajectory", headers=auth)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["runId"] == run_id
+    assert len(body["sections"]) == 1
+    section = body["sections"][0]
+    assert section["sectionTitle"] == "Technical Approach"
+    assert section["attemptCount"] == 2
+    assert len(section["attempts"]) == 2
+    # Round 1's feedback survives here, unlike proposal_sections.review_notes
+    # which only ever keeps the latest round.
+    assert section["attempts"][0]["critic"]["feedback"] == "Cite a contract."
+
+    # Tenant isolation: another user can't read this proposal's trajectory.
+    other_auth = _auth(other_tenant)
+    assert (
+        test_client.get(
+            f"/proposals/{proposal_id}/drafting/trajectory", headers=other_auth
+        ).status_code
+        == 404
+    )
+
+
+def test_drafting_trajectory_404s_when_no_run_recorded(test_client, proposal_with_requirements):
+    proposal_id = proposal_with_requirements["proposal_id"]
+    auth = _auth(proposal_with_requirements["user_id"])
+
+    resp = test_client.get(f"/proposals/{proposal_id}/drafting/trajectory", headers=auth)
+    assert resp.status_code == 404
