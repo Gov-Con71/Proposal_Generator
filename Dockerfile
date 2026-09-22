@@ -2,6 +2,16 @@
 # (default `docker build .` / PaaS auto-detect). Equivalent to
 # `backend/Dockerfile.prod` when the build context is `./backend`.
 #
+# DUPLICATION WARNING: two production images for one service will drift, and
+# already have — this one shipped an exec-form CMD binding port 8000 and 4
+# workers after Dockerfile.prod had been corrected, so a root-context deploy
+# would have failed its health check on the wrong port. `render.yaml` names
+# `backend/Dockerfile.prod` explicitly, which is the narrower build context
+# (frontend changes don't invalidate its layer cache) and makes root
+# auto-detection unnecessary, so that one is the better single source. Delete
+# this file if nothing else builds from the root; fix both in lockstep if
+# something does.
+#
 # Multi-stage so the build toolchain (gcc/libpq-dev) never ships in the
 # final image. Runs gunicorn with uvicorn workers as a non-root user.
 
@@ -48,10 +58,22 @@ EXPOSE 8000
 # Optional: set RUN_MIGRATIONS=true so entrypoint applies alembic before start.
 ENTRYPOINT ["./entrypoint.sh"]
 
-# 4 uvicorn workers behind gunicorn. Tune -w to CPU count on the target host.
+# Shell form on purpose: the managed hosts this file exists for assign the port
+# through $PORT and mark a service listening anywhere else as unhealthy, and the
+# exec form does not expand variables. The 8000 fallback keeps compose working.
+#
+# WEB_CONCURRENCY defaults to 2, not 4: each uvicorn worker loads the whole
+# import graph — markitdown[all] pulls onnxruntime — so four exhaust a small
+# instance before serving a request. Raise it with the instance size.
+#
+# --timeout is generous because the progress stream holds an SSE connection open
+# for as long as ingestion runs, which has been measured in minutes.
+#
 # Override CMD for the Celery worker:
 #   celery -A app.worker.celery_app:celery_app worker --loglevel=info --concurrency=2
-CMD ["gunicorn", "app.main:app", \
-     "-k", "uvicorn.workers.UvicornWorker", \
-     "-w", "4", "-b", "0.0.0.0:8000", \
-     "--access-logfile", "-", "--error-logfile", "-"]
+CMD ["sh", "-c", "exec gunicorn app.main:app \
+     -k uvicorn.workers.UvicornWorker \
+     -b 0.0.0.0:${PORT:-8000} \
+     --workers ${WEB_CONCURRENCY:-2} \
+     --timeout ${GUNICORN_TIMEOUT:-120} \
+     --access-logfile - --error-logfile -"]

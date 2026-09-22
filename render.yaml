@@ -125,7 +125,9 @@ services:
       # Featherless, not Gemini: Gemini's free tier is 20 requests/day/model and
       # one proposal's drafting exceeds that. Models are pinned rather than left
       # to defaults because a silently retired model name is the exact failure
-      # this project has already hit (§1.1).
+      # this project has already hit (§1.1) — and startup_checks.check_models()
+      # now validates these against the live API at boot, so a bad name fails
+      # the deploy loudly instead of dying minutes later inside a Celery task.
       - key: LLM_PROVIDER
         value: featherless
       - key: LLM_MODEL
@@ -134,6 +136,15 @@ services:
         value: Qwen/Qwen3-Embedding-8B
       - key: FEATHERLESS_API_KEY
         sync: false
+      # Alternative: LLM_PROVIDER=openai_compatible points the same adapter at
+      # any OpenAI-compatible host (OpenRouter, Together, an Agent Router key,
+      # a self-hosted vLLM) via LLM_BASE_URL + LLM_API_KEY, no new code. Note
+      # EMBEDDING_MODEL still has to resolve on whatever host you choose —
+      # retrieval needs 768-dim embeddings, not just chat completions.
+      # - key: LLM_BASE_URL
+      #   value: https://openrouter.ai/api/v1
+      # - key: LLM_API_KEY
+      #   sync: false
 
       # --- Runtime ------------------------------------------------------------
       # 2 gunicorn workers, not 4: each loads the whole import graph, and
