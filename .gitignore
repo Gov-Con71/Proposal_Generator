@@ -42,9 +42,6 @@ Thumbs.db
 htmlcov/
 .coverage
 
-# Docker
-*.dockerignore
-
 # Temporary files
 *~
 .#*

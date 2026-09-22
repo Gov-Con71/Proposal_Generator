@@ -1,0 +1,30 @@
+# Keep the production build context small and free of secrets / host junk.
+.git
+.github
+.claude
+.env
+.env.*
+!**/.env.example
+*.md
+!README.md
+
+# Frontend is deployed separately (Vercel); do not ship it in the API image.
+proposalai-frontend
+
+# Local / generated artifacts
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.coverage
+**/htmlcov
+**/.venv
+**/venv
+**/node_modules
+**/.next
+**/.terraform
+**/*.tfstate
+**/*.tfstate.*
+
+# Compose and local-only tooling (not needed inside the image)
+docker-compose*.yml
+package-lock.json
