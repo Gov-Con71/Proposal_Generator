@@ -103,6 +103,13 @@ class Settings(BaseSettings):
         default="proposal-artifacts-local", validation_alias="S3_BUCKET_NAME"
     )
     aws_region: str = Field(default="us-east-1", validation_alias="AWS_DEFAULT_REGION")
+    # Points boto3 at an S3-compatible provider that isn't AWS — Cloudflare R2,
+    # Backblaze B2, MinIO. Empty (the default) means real AWS S3, so existing
+    # deployments are unaffected. Independent of use_localstack: that flag also
+    # injects dummy credentials, which a real provider rejects.
+    # R2's endpoint looks like https://<account-id>.r2.cloudflarestorage.com and
+    # needs aws_region="auto".
+    s3_endpoint_url: str = Field(default="", validation_alias="S3_ENDPOINT_URL")
     max_upload_bytes: int = Field(
         default=50 * 1024 * 1024, validation_alias="MAX_UPLOAD_BYTES"
     )  # 50 MB — mirrors the frontend drop-zone limit

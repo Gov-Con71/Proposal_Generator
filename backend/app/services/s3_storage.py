@@ -20,8 +20,25 @@ class S3Storage:
         self.bucket_name = bucket_name or settings.s3_bucket_name
         self.client = self._build_client()
 
+    @staticmethod
+    def _third_party_endpoint() -> str:
+        """The non-AWS S3 endpoint in effect, or "" when talking to real AWS.
+
+        LocalStack is deliberately excluded even though it is also an endpoint
+        override: it gets its own branch below because it needs dummy
+        credentials, which a real provider rejects.
+
+        Both `_build_client` and `_provision_bucket` read this rather than
+        testing `settings.s3_endpoint_url` themselves, so the endpoint the
+        client points at and the shape of the bucket-creation call cannot
+        disagree — which is the failure this whole file keeps running into.
+        """
+        if settings.use_localstack:
+            return ""
+        return settings.s3_endpoint_url
+
     def _build_client(self):
-        """Wires boto3 to LocalStack or real AWS based on settings."""
+        """Wires boto3 to LocalStack, a third-party S3 provider, or real AWS."""
         kwargs = {"region_name": settings.aws_region}
         if settings.use_localstack:
             # LocalStack accepts dummy credentials; real env vars override these.
@@ -32,6 +49,11 @@ class S3Storage:
                     "aws_secret_access_key": os.getenv("AWS_SECRET_ACCESS_KEY", "test"),
                 }
             )
+        elif endpoint := self._third_party_endpoint():
+            # Cloudflare R2, Backblaze B2, self-hosted MinIO. Credentials still
+            # come from the standard AWS_* env vars, which boto3 resolves on its
+            # own — only the endpoint differs.
+            kwargs["endpoint_url"] = endpoint
         return boto3.client("s3", **kwargs)
 
     def ensure_bucket_exists(self) -> None:
@@ -47,7 +69,13 @@ class S3Storage:
 
     def _provision_bucket(self) -> None:
         """Region-aware bucket creation; us-east-1 forbids a LocationConstraint."""
-        if settings.aws_region == "us-east-1":
+        # A third-party provider has no AWS regions to constrain a bucket to, and
+        # R2 rejects the LocationConstraint outright: it wants
+        # AWS_DEFAULT_REGION="auto", which is not a location it will then accept
+        # as one. So it takes the same bare call us-east-1 does — otherwise the
+        # first upload fails on bucket creation rather than on anything to do
+        # with the upload, which reads as a credentials problem and isn't one.
+        if settings.aws_region == "us-east-1" or self._third_party_endpoint():
             self.client.create_bucket(Bucket=self.bucket_name)
         else:
             self.client.create_bucket(
