@@ -38,12 +38,32 @@ COPY --from=builder /opt/venv /opt/venv
 RUN useradd --create-home --uid 1001 appuser
 WORKDIR /code
 COPY --chown=appuser:appuser . .
+# Git on Windows does not preserve the executable bit, so set it here rather
+# than trusting the build context — a non-executable entrypoint fails the
+# container at start with a bare "permission denied".
+RUN chmod +x /code/entrypoint.sh
 USER appuser
 
 EXPOSE 8000
 
-# 4 uvicorn workers behind gunicorn. Tune -w to CPU count on the target host.
-CMD ["gunicorn", "app.main:app", \
-     "-k", "uvicorn.workers.UvicornWorker", \
-     "-w", "4", "-b", "0.0.0.0:8000", \
-     "--access-logfile", "-", "--error-logfile", "-"]
+# Applies outstanding migrations when RUN_MIGRATIONS=true, then execs the CMD.
+# Set it on the API service only; the worker shares this image and must not
+# race it.
+ENTRYPOINT ["/code/entrypoint.sh"]
+
+# Shell form on purpose: a managed host (Render, Fly, Cloud Run) assigns the
+# port through $PORT and refuses a service that listens anywhere else, and the
+# exec form does not expand variables. The 8000 fallback keeps compose working.
+#
+# WEB_CONCURRENCY defaults to 2, not 4: each uvicorn worker loads the whole
+# import graph — markitdown[all] pulls onnxruntime — so four of them exhaust a
+# small instance before serving a request. Raise it with the instance size.
+#
+# --timeout is generous because the progress stream holds an SSE connection
+# open for as long as ingestion runs, which has been measured in minutes.
+CMD ["sh", "-c", "exec gunicorn app.main:app \
+     -k uvicorn.workers.UvicornWorker \
+     -b 0.0.0.0:${PORT:-8000} \
+     --workers ${WEB_CONCURRENCY:-2} \
+     --timeout ${GUNICORN_TIMEOUT:-120} \
+     --access-logfile - --error-logfile -"]
