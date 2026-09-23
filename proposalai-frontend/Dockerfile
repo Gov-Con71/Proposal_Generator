@@ -1,11 +1,14 @@
 # Stage 1: Install dependencies
-FROM node:20-alpine AS deps
+# Node 24, not 20: package.json declares engines ">=22.22.2" (jsdom@30 and
+# undici@8 require it). npm only warns on a mismatch, so a Node 20 image
+# installs happily and fails later in ways that name the wrong package.
+FROM node:24-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install --legacy-peer-deps
 
 # Stage 2: Build
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -18,7 +21,7 @@ ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 RUN npm run build
 
 # Stage 3: Production runner
-FROM node:20-alpine AS runner
+FROM node:24-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1

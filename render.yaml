@@ -1,0 +1,251 @@
+# Render Blueprint — the whole ProposalAI stack as code.
+#
+# Apply it: Render Dashboard → New → Blueprint → pick this repo. Render creates
+# all five resources and prompts for every var marked `sync: false` (keys and
+# secrets), so nothing sensitive lives in this file.
+#
+# Why a blueprint instead of clicking through the dashboard: this project has
+# twice been broken by configuration that read correctly in git and was wrong in
+# reality (GAP_ANALYSIS §1.1, §1.4 — a gitignored .env outranking the committed
+# defaults). Config that lives in the repo gets reviewed like code.
+#
+# Every field and plan ID below was checked against render.com/docs/blueprint-spec
+# rather than recalled. Two notes that follow from that:
+#   - Plan IDs are the current compute-plan format (`1c-2g`), not the retired
+#     tier names (`starter`, `standard`). The old names no longer validate.
+#   - `type: keyvalue`; `redis` is a deprecated alias.
+
+databases:
+  - name: proposalai-db
+    databaseName: rfp_proposal_db
+    user: rfp_admin
+    # 0.5 CPU / 1 GB. The default (0.1c-256mb) is too small to hold the ivfflat
+    # index pages in cache, and vector search falls off a cliff when it can't.
+    plan: 0.5c-1g
+    # pgvector and uuid-ossp are both supported on Render Postgres 13+ and are
+    # created by migration 0001_baseline_schema (CREATE EXTENSION vector),
+    # so there is nothing to enable by hand.
+    postgresMajorVersion: "17"
+    ipAllowList: [] # private network only — no public Postgres endpoint
+
+services:
+  # ── Key Value: Celery broker + result backend + cache ────────────────────────
+  - type: keyvalue
+    name: proposalai-kv
+    # plan omitted → 256mb, which is ample for a task queue plus the HyDE cache.
+    # NOTE: Render's connectionString carries no /N database suffix, so all three
+    # consumers share DB 0 (compose splits them across 0/1/2). Safe here only
+    # because the key prefixes don't collide — Celery uses `celery-task-meta-*`
+    # and `_kombu.*`, the cache uses `hyde:*` and friends. Keep it that way.
+    maxmemoryPolicy: noeviction # a broker that silently drops queued tasks is worse than a full one
+    ipAllowList: [] # private network only
+
+  # ── FastAPI API ─────────────────────────────────────────────────────────────
+  - type: web
+    name: proposalai-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile.prod
+    dockerContext: ./backend
+    plan: 1c-2g
+    healthCheckPath: /health # unauthenticated liveness probe (monitoring.py)
+    # Render's documented place for migrations: runs to completion BEFORE the
+    # new container goes live, so it can't race a second instance the way an
+    # entrypoint migration would once this service scales past one.
+    preDeployCommand: alembic upgrade head
+    envVars:
+      # Belt and braces with preDeployCommand above. The entrypoint's
+      # `alembic upgrade head` is a no-op when the schema is already at head, so
+      # the cost is a couple of seconds per boot — cheap insurance against the
+      # single worst failure mode here, which is an unmigrated schema turning
+      # every request into a 500. Never set this on the worker.
+      - key: RUN_MIGRATIONS
+        value: "true"
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: proposalai-db
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService: { name: proposalai-kv, type: keyvalue, property: connectionString }
+      - key: CELERY_RESULT_BACKEND
+        fromService: { name: proposalai-kv, type: keyvalue, property: connectionString }
+      - key: CACHE_URL
+        fromService: { name: proposalai-kv, type: keyvalue, property: connectionString }
+
+      # --- Auth ---------------------------------------------------------------
+      # config.py falls back to "dev-insecure-change-me", which is committed and
+      # public — anyone could mint a valid token. `generateValue: true` has
+      # Render create a 256-bit secret at sync time, so no human ever handles
+      # it. It must be the SAME value on the worker; see the note there.
+      - key: JWT_SECRET
+        generateValue: true
+
+      # --- Cross-site cookie --------------------------------------------------
+      # On the default *.onrender.com names the frontend and API are separate
+      # registrable domains, so the refresh cookie is third-party: None+Secure
+      # is the minimum that works at all, and Safari plus every iOS browser
+      # still block it. Custom domains under one parent (app./api.yourdomain.com)
+      # with COOKIE_DOMAIN set is the only config that works for every visitor.
+      - key: COOKIE_SAMESITE
+        value: none
+      - key: COOKIE_SECURE
+        value: "true"
+      # - key: COOKIE_DOMAIN
+      #   value: .yourdomain.com      # uncomment once custom domains are live
+
+      # The frontend's public URL, exactly — a credentialed request rejects "*".
+      # Not knowable until the frontend's first deploy, hence the prompt.
+      - key: CORS_ORIGINS
+        sync: false
+
+      # --- Object storage -----------------------------------------------------
+      # LocalStack is dev-only. Uploads must go somewhere both services can
+      # reach, which rules out a Render persistent disk (a disk attaches to one
+      # service, and the worker has to read what the API wrote).
+      - key: USE_LOCALSTACK
+        value: "false"
+      - key: S3_BUCKET_NAME
+        sync: false
+      - key: AWS_DEFAULT_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      # Leave unset for real AWS S3. Set it to use an S3-compatible provider
+      # instead — Cloudflare R2's free tier is 10 GB with no egress charges,
+      # which is the cheap option. With R2, AWS_DEFAULT_REGION must be "auto".
+      # The bucket is created on first upload if the key allows it. Must match
+      # on the worker, or the two services read and write different buckets.
+      # - key: S3_ENDPOINT_URL
+      #   sync: false
+
+      # --- LLM provider -------------------------------------------------------
+      # Featherless, not Gemini: Gemini's free tier is 20 requests/day/model and
+      # one proposal's drafting exceeds that. Models are pinned rather than left
+      # to defaults because a silently retired model name is the exact failure
+      # this project has already hit (§1.1) — and startup_checks.check_models()
+      # now validates these against the live API at boot, so a bad name fails
+      # the deploy loudly instead of dying minutes later inside a Celery task.
+      - key: LLM_PROVIDER
+        value: featherless
+      - key: LLM_MODEL
+        value: Qwen/Qwen2.5-32B-Instruct
+      - key: EMBEDDING_MODEL
+        value: Qwen/Qwen3-Embedding-8B
+      - key: FEATHERLESS_API_KEY
+        sync: false
+      # Alternative: LLM_PROVIDER=openai_compatible points the same adapter at
+      # any OpenAI-compatible host (OpenRouter, Together, an Agent Router key,
+      # a self-hosted vLLM) via LLM_BASE_URL + LLM_API_KEY, no new code. Note
+      # EMBEDDING_MODEL still has to resolve on whatever host you choose —
+      # retrieval needs 768-dim embeddings, not just chat completions.
+      # - key: LLM_BASE_URL
+      #   value: https://openrouter.ai/api/v1
+      # - key: LLM_API_KEY
+      #   sync: false
+
+      # --- Runtime ------------------------------------------------------------
+      # 2 gunicorn workers, not 4: each loads the whole import graph, and
+      # markitdown[all] drags in onnxruntime. Raise it with the plan, not before.
+      - key: WEB_CONCURRENCY
+        value: "2"
+      - key: LOG_FORMAT
+        value: json
+      - key: SENTRY_DSN
+        sync: false
+
+  # ── Celery worker: ingestion, drafting, exports ──────────────────────────────
+  # A separate service rather than a second process beside gunicorn: drafting
+  # runs have been measured at 11-12 minutes, which needs a process no HTTP
+  # timeout can interrupt.
+  - type: worker
+    name: proposalai-worker
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile.prod # same image as the API
+    dockerContext: ./backend
+    plan: 2c-4g # the memory-hungry one: onnxruntime + LangGraph, forked per concurrency
+    dockerCommand: celery -A app.worker.celery_app:celery_app worker --loglevel=info --concurrency=2
+    envVars:
+      # RUN_MIGRATIONS is deliberately absent — the API owns migrations, and the
+      # worker shares this image and entrypoint.
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: proposalai-db
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService: { name: proposalai-kv, type: keyvalue, property: connectionString }
+      - key: CELERY_RESULT_BACKEND
+        fromService: { name: proposalai-kv, type: keyvalue, property: connectionString }
+      # The worker writes requirements straight to the DB, so it has to be able
+      # to evict what the API cached on its behalf. Without this a freshly
+      # ingested RFP shows an empty workspace for a full TTL.
+      - key: CACHE_URL
+        fromService: { name: proposalai-kv, type: keyvalue, property: connectionString }
+      # Must equal the API's JWT_SECRET. `generateValue` here would mint a
+      # DIFFERENT secret and every token the worker checks would look forged, so
+      # this one is a prompt: paste the value Render generated for the API
+      # (Dashboard → proposalai-api → Environment).
+      - key: JWT_SECRET
+        sync: false
+      - key: USE_LOCALSTACK
+        value: "false"
+      - key: S3_BUCKET_NAME
+        sync: false
+      - key: AWS_DEFAULT_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      # Keep in lockstep with the API's setting, or the worker writes chunks to
+      # a different bucket than the one the API reads.
+      # - key: S3_ENDPOINT_URL
+      #   sync: false
+      - key: LLM_PROVIDER
+        value: featherless
+      - key: LLM_MODEL
+        value: Qwen/Qwen2.5-32B-Instruct
+      - key: EMBEDDING_MODEL
+        value: Qwen/Qwen3-Embedding-8B
+      - key: FEATHERLESS_API_KEY
+        sync: false
+      # Featherless meters CONCURRENCY, not requests: Qwen2.5-32B costs 2 of a
+      # budget that reads as 4, so two parallel sections throttle each other and
+      # the run takes longer than doing them one at a time. Leave this at 1
+      # until the plan's concurrency budget actually grows.
+      - key: DRAFT_MAX_CONCURRENCY
+        value: "1"
+      - key: LOG_FORMAT
+        value: json
+      - key: SENTRY_DSN
+        sync: false
+
+  # ── Next.js frontend ────────────────────────────────────────────────────────
+  # Here because you asked for the whole project on Render. Vercel is the better
+  # host for Next specifically (edge CDN, ISR, image optimization all work
+  # without configuration) — if you go that way, delete this service and keep
+  # the three above; nothing else in this file changes.
+  - type: web
+    name: proposalai-web
+    runtime: docker
+    dockerfilePath: ./proposalai-frontend/Dockerfile
+    dockerContext: ./proposalai-frontend
+    plan: 0.5c-512mb # `output: 'standalone'` — serves a prebuilt bundle, needs little
+    envVars:
+      # Render translates a Docker service's env vars into build args, which is
+      # what makes this work: NEXT_PUBLIC_* is inlined into the client bundle at
+      # BUILD time by `ARG NEXT_PUBLIC_API_URL` in the Dockerfile. Set it to the
+      # API's public https:// URL. Get this wrong and the built bundle calls
+      # http://localhost:8000 from the visitor's browser — the app loads, and
+      # every request fails, with nothing in the server logs to explain it.
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
+      # Only needed if next.config.ts should allow remote images from the API.
+      - key: NEXT_PUBLIC_API_HOSTNAME
+        sync: false
+      - key: NODE_ENV
+        value: production
