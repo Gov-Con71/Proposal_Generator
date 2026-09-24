@@ -82,11 +82,16 @@ services:
         generateValue: true
 
       # --- Cross-site cookie --------------------------------------------------
-      # On the default *.onrender.com names the frontend and API are separate
-      # registrable domains, so the refresh cookie is third-party: None+Secure
+      # The frontend is on Vercel and the API is here, so they are separate
+      # registrable domains and the refresh cookie is third-party: None+Secure
       # is the minimum that works at all, and Safari plus every iOS browser
-      # still block it. Custom domains under one parent (app./api.yourdomain.com)
-      # with COOKIE_DOMAIN set is the only config that works for every visitor.
+      # still block it outright.
+      #
+      # COOKIE_DOMAIN cannot rescue this on the default hostnames: .vercel.app
+      # is on the Public Suffix List, so a browser refuses any cookie scoped to
+      # it — exactly so one Vercel project cannot set cookies for another.
+      # Custom domains under one parent (app./api.yourdomain.com) plus
+      # COOKIE_DOMAIN is the only configuration that works for every visitor.
       - key: COOKIE_SAMESITE
         value: none
       - key: COOKIE_SECURE
@@ -94,9 +99,18 @@ services:
       # - key: COOKIE_DOMAIN
       #   value: .yourdomain.com      # uncomment once custom domains are live
 
-      # The frontend's public URL, exactly — a credentialed request rejects "*".
+      # The Vercel production URL, exactly — a credentialed request rejects "*".
       # Not knowable until the frontend's first deploy, hence the prompt.
       - key: CORS_ORIGINS
+        sync: false
+      # Vercel mints a fresh hostname for every preview build, so previews can't
+      # be enumerated in CORS_ORIGINS — without a pattern here, every preview
+      # branch fails CORS. Anchor it and pin the project prefix; this is matched
+      # with credentials allowed, so `https://.*\.vercel\.app` would hand every
+      # site on Vercel an authenticated session. Shaped like:
+      #   ^https://<project>-[a-z0-9-]+\.vercel\.app$
+      # Leave unset to keep exact matching only (previews then won't work).
+      - key: CORS_ORIGIN_REGEX
         sync: false
 
       # --- Object storage -----------------------------------------------------
@@ -224,28 +238,19 @@ services:
       - key: SENTRY_DSN
         sync: false
 
-  # ── Next.js frontend ────────────────────────────────────────────────────────
-  # Here because you asked for the whole project on Render. Vercel is the better
-  # host for Next specifically (edge CDN, ISR, image optimization all work
-  # without configuration) — if you go that way, delete this service and keep
-  # the three above; nothing else in this file changes.
-  - type: web
-    name: proposalai-web
-    runtime: docker
-    dockerfilePath: ./proposalai-frontend/Dockerfile
-    dockerContext: ./proposalai-frontend
-    plan: 0.5c-512mb # `output: 'standalone'` — serves a prebuilt bundle, needs little
-    envVars:
-      # Render translates a Docker service's env vars into build args, which is
-      # what makes this work: NEXT_PUBLIC_* is inlined into the client bundle at
-      # BUILD time by `ARG NEXT_PUBLIC_API_URL` in the Dockerfile. Set it to the
-      # API's public https:// URL. Get this wrong and the built bundle calls
-      # http://localhost:8000 from the visitor's browser — the app loads, and
-      # every request fails, with nothing in the server logs to explain it.
-      - key: NEXT_PUBLIC_API_URL
-        sync: false
-      # Only needed if next.config.ts should allow remote images from the API.
-      - key: NEXT_PUBLIC_API_HOSTNAME
-        sync: false
-      - key: NODE_ENV
-        value: production
+  # ── The frontend is NOT here ────────────────────────────────────────────────
+  # It deploys to Vercel, which is the better host for Next (edge CDN, ISR and
+  # image optimization all work with no configuration). Nothing in this file
+  # builds it; `proposalai-frontend/Dockerfile` stays for compose and as an
+  # escape hatch, and Vercel ignores it in favour of its own Next build.
+  #
+  # The two ends still have to agree on three things:
+  #   1. NEXT_PUBLIC_API_URL on Vercel = this API's public https:// URL. It is
+  #      inlined into the client bundle at BUILD time, so changing it needs a
+  #      redeploy, not a restart.
+  #   2. CORS_ORIGINS here = the Vercel production URL, and CORS_ORIGIN_REGEX
+  #      here = the preview-hostname pattern (see both above).
+  #   3. The refresh cookie is cross-site between *.vercel.app and
+  #      *.onrender.com, and COOKIE_DOMAIN cannot bridge them — .vercel.app is
+  #      on the Public Suffix List, so browsers refuse a cookie scoped to it.
+  #      Custom domains under one parent are the only fix for Safari/iOS.

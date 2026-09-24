@@ -264,6 +264,22 @@ class Settings(BaseSettings):
     cors_origins: str = Field(
         default="http://localhost:3000", validation_alias="CORS_ORIGINS"
     )
+    # Matches origins that cannot be enumerated ahead of time — chiefly Vercel
+    # preview deployments, which get a fresh hostname per build, so listing them
+    # in CORS_ORIGINS means editing it on every branch. Empty (default) means
+    # exact matching only.
+    #
+    # SECURITY: this is matched against the caller's Origin with credentials
+    # allowed, so a loose pattern hands any site it matches an authenticated
+    # session. Anchor both ends and pin your own project prefix:
+    #
+    #   ^https://proposalai-frontend-[a-z0-9-]+\.vercel\.app$   correct
+    #   https://.*\.vercel\.app                                 every Vercel site, anchored nowhere
+    #
+    # Starlette applies `re.fullmatch`, so a missing `^`/`$` is less dangerous
+    # than it looks — but `.*\.vercel\.app` still matches all of Vercel, and an
+    # unescaped `.` matches any character.
+    cors_origin_regex: str = Field(default="", validation_alias="CORS_ORIGIN_REGEX")
 
     @property
     def cors_origin_list(self) -> list[str]:

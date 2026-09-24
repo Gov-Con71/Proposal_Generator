@@ -87,6 +87,12 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
+    # Exact origins cover production; the regex covers hosts that cannot be
+    # enumerated in advance — Vercel gives every preview deployment its own
+    # hostname, so without this each preview branch fails CORS. Empty by
+    # default, and Starlette ignores an empty pattern rather than matching
+    # everything. See the security note on the setting before widening it.
+    allow_origin_regex=settings.cors_origin_regex or None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
