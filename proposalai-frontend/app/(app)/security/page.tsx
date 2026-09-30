@@ -1,5 +1,5 @@
 'use client'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import QRCode from 'qrcode'
 import Image from 'next/image'
@@ -8,6 +8,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ErrorState } from '@/components/ui/state'
 import { ShieldCheck, Key, Smartphone } from 'lucide-react'
+import { PasswordRequirements, usePasswordPolicy } from '@/components/ui/password-requirements'
+import { authError, passwordError } from '@/lib/password-validation'
 import { authApi } from '@/lib/api'
 import { useAuthStore } from '@/lib/stores/auth-store'
 import { useActiveSessions } from '@/lib/hooks'
@@ -49,12 +51,23 @@ export default function SecurityPage() {
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
-  async function handleChangePassword() {
+  const policy = usePasswordPolicy()
+  const currentRef = useRef<HTMLInputElement>(null)
+  const nextRef = useRef<HTMLInputElement>(null)
+  const confirmRef = useRef<HTMLInputElement>(null)
+  const [fieldErrors, setFieldErrors] = useState({ current: '', next: '', confirm: '' })
+
+  async function handleChangePassword(event: React.FormEvent) {
+    event.preventDefault()
     setError(null)
-    // Checked here so a typo costs a keystroke rather than a round trip; the
-    // server never sees the confirmation field and enforces strength itself.
-    if (next !== confirm) {
-      setError('The new passwords do not match.')
+    const errors = {
+      current: current ? '' : 'Enter your current password.',
+      next: passwordError(next, policy),
+      confirm: !confirm ? 'Confirm your new password.' : next !== confirm ? 'The new passwords do not match.' : '',
+    }
+    setFieldErrors(errors)
+    if (errors.current || errors.next || errors.confirm) {
+      (errors.current ? currentRef : errors.next ? nextRef : confirmRef).current?.focus()
       return
     }
     setSaving(true)
@@ -66,12 +79,16 @@ export default function SecurityPage() {
       clearSession()
       router.push('/login?changed=1')
     } catch (err) {
-      const res = (err as { response?: { status?: number; data?: { detail?: string } } }).response
-      setError(
-        res?.status === 401
-          ? 'Your current password is incorrect.'
-          : res?.data?.detail || 'Could not update your password. Please try again.'
-      )
+      const failure = authError(err, 'Could not update your password. Please try again.')
+      if (failure.code === 'incorrect_current_password') {
+        setFieldErrors({ current: failure.message, next: '', confirm: '' })
+        currentRef.current?.focus()
+      } else if (failure.status === 422 && (!failure.field || ['newPassword', 'new_password'].includes(failure.field))) {
+        setFieldErrors({ current: '', next: failure.message, confirm: '' })
+        nextRef.current?.focus()
+      } else {
+        setError(failure.message)
+      }
       setSaving(false)
     }
   }
@@ -82,43 +99,50 @@ export default function SecurityPage() {
       <p className="text-xs text-[var(--text-secondary)] mb-5">Manage your account security settings.</p>
 
       <Card className="mb-4">
-        <div className="flex items-center gap-3 mb-4">
-          <div className="w-8 h-8 rounded-lg bg-primary-50 flex items-center justify-center">
-            <Key className="w-4 h-4 text-primary-600" />
+        <form onSubmit={handleChangePassword}>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-8 h-8 rounded-lg bg-primary-50 flex items-center justify-center">
+              <Key className="w-4 h-4 text-primary-600" />
+            </div>
+            <div>
+              <p className="text-sm font-medium">Change password</p>
+              <p className="text-xs text-[var(--text-tertiary)]">
+                Updating your password signs out every device, including this one.
+              </p>
+            </div>
           </div>
-          <div>
-            <p className="text-sm font-medium">Change password</p>
-            <p className="text-xs text-[var(--text-tertiary)]">
-              Updating your password signs out every device, including this one.
-            </p>
+          <div className="flex flex-col gap-3">
+            <Input
+              label="Current password" type="password" placeholder="••••••••"
+              value={current} ref={currentRef} error={fieldErrors.current} autoComplete="current-password"
+              onChange={(e) => { setCurrent(e.target.value); setFieldErrors((old) => ({ ...old, current: '' })) }}
+            />
+            <Input
+              label="New password" type="password" placeholder="••••••••"
+              value={next} ref={nextRef} error={fieldErrors.next} autoComplete="new-password"
+              aria-describedby="change-password-requirements"
+              onChange={(e) => { setNext(e.target.value); setFieldErrors((old) => ({ ...old, next: '', confirm: '' })) }}
+            />
+            <PasswordRequirements id="change-password-requirements" password={next} policy={policy} />
+            <Input
+              label="Confirm password" type="password" placeholder="••••••••"
+              value={confirm} ref={confirmRef} error={fieldErrors.confirm} autoComplete="new-password"
+              onChange={(e) => { setConfirm(e.target.value); setFieldErrors((old) => ({ ...old, confirm: '' })) }}
+            />
           </div>
-        </div>
-        <div className="flex flex-col gap-3">
-          <Input
-            label="Current password" type="password" placeholder="••••••••"
-            value={current} onChange={(e) => setCurrent(e.target.value)}
-          />
-          <Input
-            label="New password" type="password" placeholder="••••••••"
-            value={next} onChange={(e) => setNext(e.target.value)}
-          />
-          <Input
-            label="Confirm password" type="password" placeholder="••••••••"
-            value={confirm} onChange={(e) => setConfirm(e.target.value)}
-          />
-        </div>
-        {error && (
-          <p role="alert" className="text-xs text-danger-600 mt-3">{error}</p>
-        )}
-        <div className="flex justify-end mt-4">
-          <Button
-            variant="primary" size="sm"
-            onClick={handleChangePassword}
-            disabled={saving || !current || !next || !confirm}
-          >
-            {saving ? 'Updating…' : 'Update password'}
-          </Button>
-        </div>
+          {error && (
+            <p role="alert" className="text-xs text-danger-600 mt-3">{error}</p>
+          )}
+          <div className="flex justify-end mt-4">
+            <Button
+              variant="primary" size="sm"
+              type="submit"
+              disabled={saving}
+            >
+              {saving ? 'Updating…' : 'Update password'}
+            </Button>
+          </div>
+        </form>
       </Card>
 
       <TwoFactorCard />

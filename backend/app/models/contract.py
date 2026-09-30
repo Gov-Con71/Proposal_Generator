@@ -69,6 +69,12 @@ class RegisterRequest(CamelModel):
     company: str = ""
 
 
+class PasswordPolicyResponse(CamelModel):
+    min_length: int
+    max_bytes: int
+    min_distinct_characters: int
+
+
 class PasswordChangeRequest(CamelModel):
     current_password: str
     new_password: str

@@ -27,7 +27,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from app.core import rate_limit
 from app.core.config import settings
 from app.core.deps import get_current_user, get_current_user_id, require_role
-from app.core.password_policy import WeakPasswordError, validate_password
+from app.core.password_policy import (
+    MAX_PASSWORD_BYTES, MIN_DISTINCT_CHARACTERS, WeakPasswordError, validate_password,
+)
 from app.core.security import (
     create_access_token,
     create_two_factor_challenge_token,
@@ -39,6 +41,7 @@ from app.models.contract import (
     LoginRequest,
     MessageResponse,
     PasswordChangeRequest,
+    PasswordPolicyResponse,
     RegisterRequest,
     Session,
     SetActiveRequest,
@@ -56,6 +59,15 @@ from app.services import user_service as users
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+
+
+@router.get("/password-policy", response_model=PasswordPolicyResponse)
+def password_policy() -> PasswordPolicyResponse:
+    return PasswordPolicyResponse(
+        min_length=settings.password_min_length,
+        max_bytes=MAX_PASSWORD_BYTES,
+        min_distinct_characters=MIN_DISTINCT_CHARACTERS,
+    )
 
 
 def _set_refresh_cookie(response: Response, raw_token: str) -> None:
@@ -373,7 +385,11 @@ def change_password(
         users.change_password(user_id, payload.current_password, payload.new_password)
     except users.InvalidCredentialsError as exc:
         raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, "Your current password is incorrect."
+            status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "code": "incorrect_current_password",
+                "message": "Your current password is incorrect.",
+            },
         ) from exc
 
     revoked = refresh_tokens.revoke_all_for_user(user_id)

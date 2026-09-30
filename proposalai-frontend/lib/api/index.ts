@@ -2,6 +2,12 @@
 import apiClient from './client'
 import type { ActiveSession, Session, TwoFactorChallenge, TwoFactorSetup, User } from '@/types'
 
+export interface PasswordPolicy {
+  minLength: number
+  maxBytes: number
+  minDistinctCharacters: number
+}
+
 export interface RegisterPayload {
   email: string
   password: string
@@ -12,6 +18,9 @@ export interface RegisterPayload {
 }
 
 export const authApi = {
+  passwordPolicy: () =>
+    apiClient.get<PasswordPolicy>('/auth/password-policy').then((r) => r.data),
+
   /** Either opens a session directly, or — if the account has 2FA enabled —
    * returns a challenge token for `completeTwoFactorLogin`. */
   login: (email: string, password: string) =>
