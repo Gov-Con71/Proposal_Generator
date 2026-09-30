@@ -67,6 +67,27 @@ describe('401 handling', () => {
     expect(refreshCalls).toBe(1)
   })
 
+  it('keeps the session when the current password is incorrect', async () => {
+    const { apiClient, useAuthStore } = await loadClient()
+    useAuthStore.getState().setSession({ user: { id: 'u1' }, accessToken: 'valid', expiresAt: '' } as never)
+    server.use(http.post(`${API}/auth/password`, () => HttpResponse.json({
+      detail: { code: 'incorrect_current_password', message: 'Your current password is incorrect.' },
+    }, { status: 401 })))
+    await expect(apiClient.post('/auth/password')).rejects.toBeTruthy()
+    expect(refreshCalls).toBe(0)
+    expect(useAuthStore.getState().accessToken).toBe('valid')
+    expect(useAuthStore.getState().isAuthenticated).toBe(true)
+  })
+
+  it('still refreshes an expired session on the password endpoint', async () => {
+    const { apiClient } = await loadClient()
+    server.use(http.post(`${API}/auth/password`, () => protectedShouldSucceed
+      ? HttpResponse.json({ message: 'Updated' })
+      : HttpResponse.json({ detail: 'expired' }, { status: 401 })))
+    await expect(apiClient.post('/auth/password')).resolves.toMatchObject({ status: 200 })
+    expect(refreshCalls).toBe(1)
+  })
+
   it('shares one refresh between concurrent 401s', async () => {
     // Two requests failing at once must not both rotate the token. The second
     // rotation would present an already-consumed token, which the server treats

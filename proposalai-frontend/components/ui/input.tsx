@@ -9,7 +9,7 @@ export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> 
 }
 
 export const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ label, hint, error, className, id, ...props }, ref) => {
+  ({ label, hint, error, className, id, 'aria-describedby': describedBy, ...props }, ref) => {
     const inputId = id || label?.toLowerCase().replace(/\s+/g, '-')
 
     return (
@@ -25,6 +25,8 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
         <input
           ref={ref}
           id={inputId}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={[describedBy, error ? `${inputId}-error` : hint ? `${inputId}-hint` : ''].filter(Boolean).join(' ') || undefined}
           className={cn(
             'h-8 w-full px-2.5',
             'text-sm text-[var(--text-primary)]',
@@ -41,10 +43,10 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
           {...props}
         />
         {error && (
-          <p className="text-xs text-danger-600">{error}</p>
+          <p id={`${inputId}-error`} role="alert" className="text-xs text-danger-600">{error}</p>
         )}
         {hint && !error && (
-          <p className="text-xs text-[var(--text-tertiary)]">{hint}</p>
+          <p id={`${inputId}-hint`} className="text-xs text-[var(--text-tertiary)]">{hint}</p>
         )}
       </div>
     )

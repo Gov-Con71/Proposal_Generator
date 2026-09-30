@@ -25,6 +25,10 @@ import re
 from app.core.config import settings
 
 
+MAX_PASSWORD_BYTES = 72
+MIN_DISTINCT_CHARACTERS = 5
+
+
 class WeakPasswordError(ValueError):
     """Raised with a message intended to be shown to the person choosing it."""
 
@@ -88,7 +92,7 @@ def validate_password(password: str, *, email: str = "", name: str = "") -> None
 
     # bcrypt truncates at 72 bytes; accepting more silently ignores the rest,
     # so two different passwords could open the same account.
-    if len(password.encode("utf-8")) > 72:
+    if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
         raise WeakPasswordError("Password must be at most 72 bytes.")
 
     flat = _normalise(password)
@@ -98,7 +102,7 @@ def validate_password(password: str, *, email: str = "", name: str = "") -> None
             "something unrelated to common words."
         )
 
-    if len(set(password)) < 5:
+    if len(set(password)) < MIN_DISTINCT_CHARACTERS:
         raise WeakPasswordError(
             "Password repeats too few distinct characters."
         )

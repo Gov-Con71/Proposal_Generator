@@ -88,6 +88,11 @@ apiClient.interceptors.response.use(
     if (error.response?.status !== 401 || !original) return Promise.reject(error)
     if (NON_REFRESHABLE.some((p) => url.includes(p))) return Promise.reject(error)
 
+    const detail = (error.response.data as { detail?: { code?: string } } | undefined)?.detail
+    if (url.split('?')[0] === '/auth/password' && detail?.code === 'incorrect_current_password') {
+      return Promise.reject(error)
+    }
+
     // Refresh once per request; a genuinely revoked session must not loop.
     if (original._retried) {
       toLogin()
