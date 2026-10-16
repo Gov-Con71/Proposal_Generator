@@ -1,8 +1,8 @@
 """Password hashing and token helpers (auth, Story 4.2 + Sprint 7).
 
-Access tokens are stateless JWTs. Refresh tokens are opaque random strings
-stored as SHA-256 hashes (see app/services/refresh_token_service.py) — a JWT
-cannot be revoked, and revocation is the whole point of a refresh token.
+Access JWTs carry a stable session ID checked against live refresh-session
+state on each protected request. Refresh tokens are opaque random strings
+stored as SHA-256 hashes.
 """
 
 import hashlib
@@ -27,17 +27,18 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(subject: str) -> tuple[str, datetime]:
+def create_access_token(subject: str, *, session_id: str, session_expires_at: datetime) -> tuple[str, datetime]:
     """Signs a JWT for `subject` (the user id). Returns (token, expiry)."""
     expire = datetime.now(timezone.utc) + timedelta(
         minutes=settings.access_token_expire_minutes
     )
-    payload = {"sub": subject, "exp": expire, "type": "access"}
+    expire = min(expire, session_expires_at)
+    payload = {"sub": str(subject), "sid": str(session_id), "exp": expire, "type": "access"}
     token = jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
     return token, expire
 
 
-def create_two_factor_challenge_token(subject: str) -> str:
+def create_two_factor_challenge_token(subject: str, auth_version: int) -> str:
     """Signs a short-lived JWT proving `subject`'s password already checked out.
 
     Issued by `/auth/login` when the account has 2FA enabled, in place of a
@@ -45,11 +46,11 @@ def create_two_factor_challenge_token(subject: str) -> str:
     enough that a token intercepted in transit is useless soon after.
     """
     expire = datetime.now(timezone.utc) + timedelta(minutes=5)
-    payload = {"sub": subject, "exp": expire, "type": "2fa_challenge"}
+    payload = {"sub": subject, "version": auth_version, "exp": expire, "type": "2fa_challenge"}
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
-def decode_two_factor_challenge_token(token: str) -> str:
+def decode_two_factor_challenge_token(token: str) -> tuple[str, int]:
     """Returns the subject (user id) from a valid 2FA challenge token.
 
     Raises jwt exceptions on a bad/expired token, and ValueError if handed a
@@ -57,11 +58,12 @@ def decode_two_factor_challenge_token(token: str) -> str:
     proof the password step already passed.
     """
     payload = jwt.decode(
-        token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
+        token, settings.jwt_secret, algorithms=[settings.jwt_algorithm],
+        options={"require": ["sub", "exp", "version"]},
     )
     if payload.get("type") != "2fa_challenge":
         raise ValueError("Not a 2FA challenge token.")
-    return payload["sub"]
+    return payload["sub"], payload["version"]
 
 
 def decode_token(token: str) -> str:
@@ -70,12 +72,15 @@ def decode_token(token: str) -> str:
     Raises jwt exceptions on a bad/expired token, and ValueError if handed a
     refresh token — the two are not interchangeable.
     """
-    payload = jwt.decode(
-        token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
-    )
+    return decode_access_claims(token)["sub"]
+
+
+def decode_access_claims(token: str) -> dict:
+    payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm],
+                         options={"require": ["sub", "sid", "exp"]})
     if payload.get("type") != "access":
         raise ValueError("Not an access token.")
-    return payload["sub"]
+    return payload
 
 
 def generate_refresh_token() -> tuple[str, str, datetime]:

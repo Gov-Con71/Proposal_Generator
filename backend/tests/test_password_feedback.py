@@ -9,7 +9,9 @@ from app.core.deps import get_current_user_id
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    # These contract tests mock credential writes; throttling has its own suite.
+    monkeypatch.setattr(auth.rate_limit, "require_attempt", lambda *args: None)
     app = FastAPI()
     app.include_router(auth.router)
     app.dependency_overrides[get_current_user_id] = lambda: 'user-1'
@@ -61,14 +63,14 @@ def test_password_change_returns_readable_policy_error(client, password):
 
 
 def test_successful_change_still_revokes_sessions(client, monkeypatch):
-    revoked = []
-    monkeypatch.setattr(auth.users, 'change_password', lambda *args: None)
-    monkeypatch.setattr(auth.refresh_tokens, 'revoke_all_for_user', lambda user_id: revoked.append(user_id) or 1)
+    changed = []
+    monkeypatch.setattr(auth.users, 'change_password', lambda *args: changed.append(args))
     response = client.post('/auth/password', json={
         'currentPassword': 'old', 'newPassword': 'trombone-marmalade-97',
     })
     assert response.status_code == 200
-    assert revoked == ['user-1']
+    assert changed == [('user-1', 'old', 'trombone-marmalade-97')]
+    assert 'Max-Age=0' in response.headers['set-cookie']
     assert response.json()['message'] == 'Password updated. Sign in again to continue.'
 
 

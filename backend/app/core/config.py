@@ -1,11 +1,11 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 class Settings(BaseSettings):
-    # Load a local .env when present; ignore unrelated keys so the app always boots.
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Load a local .env when present; ignore unrelated keys and validate auth settings.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     app_name: str = "AI Proposal Platform API"
     debug: bool = True
@@ -113,10 +113,8 @@ class Settings(BaseSettings):
     )
     jwt_algorithm: str = Field(default="HS256", validation_alias="JWT_ALGORITHM")
     # Short by design. The access token now lives only in the client's memory
-    # and is reissued from the refresh cookie, so a long lifetime buys nothing
-    # and costs revocation latency: a deactivated user keeps working until their
-    # current token expires. It was 24h when the token was persisted in
-    # localStorage and a refresh round trip was something to avoid.
+    # and is reissued from the refresh cookie. Every access token is also tied
+    # to a live server-side session, so revocation takes effect immediately.
     access_token_expire_minutes: int = Field(
         default=15, validation_alias="ACCESS_TOKEN_EXPIRE_MINUTES"
     )
@@ -125,6 +123,12 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = Field(
         default=30, validation_alias="REFRESH_TOKEN_EXPIRE_DAYS"
     )
+
+    session_absolute_expire_days: int = Field(default=30, ge=1, validation_alias="SESSION_ABSOLUTE_EXPIRE_DAYS")
+    refresh_concurrency_seconds: int = Field(default=5, ge=0, le=10, validation_alias="REFRESH_CONCURRENCY_SECONDS")
+    totp_encryption_key: str = Field(default="", validation_alias="TOTP_ENCRYPTION_KEY")
+    sensitive_max_attempts: int = Field(default=8, ge=1, validation_alias="SENSITIVE_MAX_ATTEMPTS")
+    sensitive_window_seconds: int = Field(default=900, ge=1, validation_alias="SENSITIVE_WINDOW_SECONDS")
 
     # --- Refresh cookie (GAP_ANALYSIS §2.5) ---
     # The refresh token is delivered as an HttpOnly cookie so no script can read
@@ -166,7 +170,7 @@ class Settings(BaseSettings):
     )
 
     # --- Auth rate limiting (GAP_ANALYSIS §2.3) ---
-    # Counts failed attempts only, so a legitimate user is never throttled.
+    # Login counts failures; exhausted buckets temporarily reject all attempts.
     rate_limit_enabled: bool = Field(default=True, validation_alias="RATE_LIMIT_ENABLED")
     # Per-account: the control that a rotating botnet cannot evade.
     login_max_failures_per_account: int = Field(
@@ -261,5 +265,30 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @model_validator(mode="after")
+    def validate_auth_configuration(self):
+        if self.cookie_samesite not in {"lax", "strict", "none"}:
+            raise ValueError("COOKIE_SAMESITE must be lax, strict, or none")
+        if self.cookie_samesite == "none" and not self.cookie_secure:
+            raise ValueError("SameSite=None requires COOKIE_SECURE=true")
+        if self.access_token_expire_minutes <= 0 or self.refresh_token_expire_days <= 0:
+            raise ValueError("Token lifetimes must be positive")
+        if self.totp_encryption_key:
+            from cryptography.fernet import Fernet
+            try:
+                Fernet(self.totp_encryption_key.encode())
+            except (ValueError, TypeError) as exc:
+                raise ValueError("TOTP_ENCRYPTION_KEY must be a Fernet key") from exc
+        if self.environment.lower() in {"production", "staging"}:
+            if len(self.jwt_secret.encode()) < 32 or self.jwt_secret.startswith(("dev-", "change-me", "your-")):
+                raise ValueError("A strong, non-default JWT_SECRET is required")
+            if not self.cookie_secure:
+                raise ValueError("COOKIE_SECURE=true is required outside development")
+            if not self.totp_encryption_key:
+                raise ValueError("TOTP_ENCRYPTION_KEY is required outside development")
+            if not self.cors_origin_list or any(o == "*" or not o.startswith("https://") for o in self.cors_origin_list):
+                raise ValueError("Explicit HTTPS CORS_ORIGINS are required outside development")
+        return self
 
 settings = Settings()

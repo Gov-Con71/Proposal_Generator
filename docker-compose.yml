@@ -85,6 +85,9 @@ services:
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
       - CACHE_URL=redis://redis:6379/2
       - ENVIRONMENT=${ENVIRONMENT:-development}
+      - TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY:-}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+      - COOKIE_SAMESITE=${COOKIE_SAMESITE:-lax}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
       # Optional cheaper/faster model for HyDE generation and compliance
       # extraction (see app/core/config.py). Empty (default) means no tiering.
@@ -92,8 +95,11 @@ services:
       # Override in production — the app default is intentionally insecure.
       - JWT_SECRET=${JWT_SECRET:-dev-insecure-change-me}
       - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
-      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
       - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-30}
+      - SESSION_ABSOLUTE_EXPIRE_DAYS=${SESSION_ABSOLUTE_EXPIRE_DAYS:-30}
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
+      - REFRESH_COOKIE_NAME=${REFRESH_COOKIE_NAME:-proposalai_refresh}
       # Pin the models explicitly. This service bind-mounts ./backend over /code,
       # so backend/.env sits at the WORKDIR and pydantic loads it — a stale copy
       # pinning a retired model would otherwise beat the committed defaults
@@ -186,7 +192,12 @@ services:
       # logging configuration — so the two longest and most failure-prone paths
       # in the system (ingestion, drafting) reported their exceptions nowhere
       # and logged in a format nothing else used.
+      - JWT_SECRET=${JWT_SECRET:-dev-insecure-change-me}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
       - ENVIRONMENT=${ENVIRONMENT:-development}
+      - TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY:-}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+      - COOKIE_SAMESITE=${COOKIE_SAMESITE:-lax}
       - SENTRY_DSN=${SENTRY_DSN:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_FORMAT=${LOG_FORMAT:-}

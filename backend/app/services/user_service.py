@@ -10,6 +10,7 @@ from app.core.db import get_connection
 from app.core.security import hash_password, verify_password
 
 logger = logging.getLogger(__name__)
+_DUMMY_PASSWORD_HASH = hash_password("dummy-credential-timing-only")
 
 
 class EmailAlreadyExistsError(Exception):
@@ -33,11 +34,12 @@ def _row_to_user(row: dict) -> dict:
         "avatar_url": None,
         "created_at": row["created_at"].isoformat() if row.get("created_at") else "",
         "totp_enabled": bool(row.get("totp_enabled", False)),
+        "auth_version": row.get("auth_version", 0),
     }
 
 
 _USER_COLS = (
-    "user_id, email, first_name, last_name, role, company_id, created_at, totp_enabled"
+    "user_id, email, first_name, last_name, role, company_id, created_at, totp_enabled, auth_version"
 )
 
 
@@ -108,6 +110,7 @@ def authenticate(email: str, password: str) -> dict:
     finally:
         conn.close()
     if row is None or not row.get("is_active", True):
+        verify_password(password, _DUMMY_PASSWORD_HASH)
         raise InvalidCredentialsError(email)
     if not verify_password(password, row["password_hash"]):
         raise InvalidCredentialsError(email)
@@ -135,14 +138,14 @@ def change_password(user_id: UUID, current: str, new: str) -> None:
     authenticated: it is what stops a stolen access token — or an unattended
     logged-in browser — from being turned into permanent account ownership.
 
-    Callers are expected to revoke the user's refresh tokens afterwards; that is
-    left to the route so this stays a pure persistence concern.
+    The password update and session revocation commit atomically while holding
+    the same user lock as refresh rotation.
     """
     conn = get_connection()
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT password_hash, is_active FROM users WHERE user_id = %s;",
+                "SELECT password_hash, is_active FROM users WHERE user_id = %s FOR UPDATE;",
                 (str(user_id),),
             )
             row = cur.fetchone()
@@ -151,11 +154,11 @@ def change_password(user_id: UUID, current: str, new: str) -> None:
             if not verify_password(current, row["password_hash"]):
                 raise InvalidCredentialsError(str(user_id))
             cur.execute(
-                "UPDATE users SET password_hash = %s, updated_at = NOW() "
+                "UPDATE users SET password_hash = %s, auth_version = auth_version + 1, updated_at = NOW() "
                 "WHERE user_id = %s;",
                 (hash_password(new), str(user_id)),
             )
-        conn.commit()
+            cur.execute("UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = %s AND revoked_at IS NULL;", (str(user_id),))
     finally:
         conn.close()
     logger.info("Password changed for user %s", user_id)
@@ -171,9 +174,9 @@ def verify_password_for(user_id: UUID, password: str) -> None:
     """
     conn = get_connection()
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT password_hash, is_active FROM users WHERE user_id = %s;",
+                "SELECT password_hash, is_active FROM users WHERE user_id = %s FOR UPDATE;",
                 (str(user_id),),
             )
             row = cur.fetchone()
@@ -190,19 +193,20 @@ def set_active(user_id: UUID, is_active: bool) -> dict:
 
     `users.is_active` has been read on every login since Sprint 7 and written by
     nothing (GAP_ANALYSIS §4.4) — an account could be created but never shut
-    off. Deactivation only bites on the *next* token check, so the caller also
-    revokes refresh tokens; with a 15-minute access token that bounds a
-    deactivated user's remaining access to one token lifetime.
+    off. Deactivation revokes sessions in the same transaction. Account and
+    session status are checked on each protected request.
     """
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                f"UPDATE users SET is_active = %s, updated_at = NOW() "
+                f"UPDATE users SET is_active = %s, auth_version = auth_version + 1, updated_at = NOW() "
                 f"WHERE user_id = %s RETURNING {_USER_COLS};",
                 (is_active, str(user_id)),
             )
             row = cur.fetchone()
+            if row and not is_active:
+                cur.execute("UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = %s AND revoked_at IS NULL;", (str(user_id),))
         conn.commit()
     finally:
         conn.close()

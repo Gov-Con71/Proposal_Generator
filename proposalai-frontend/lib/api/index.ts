@@ -1,5 +1,6 @@
 // ─── auth.ts ─────────────────────────────────────────────────────────────────
-import apiClient from './client'
+import apiClient, { announceSessionChange, refreshSession, withSessionLock } from './client'
+import { useAuthStore } from '@/lib/stores/auth-store'
 import type { ActiveSession, Session, TwoFactorChallenge, TwoFactorSetup, User } from '@/types'
 
 export interface PasswordPolicy {
@@ -24,19 +25,19 @@ export const authApi = {
   /** Either opens a session directly, or — if the account has 2FA enabled —
    * returns a challenge token for `completeTwoFactorLogin`. */
   login: (email: string, password: string) =>
-    apiClient
+    withSessionLock(() => apiClient
       .post<Session | TwoFactorChallenge>('/auth/login', { email, password })
-      .then((r) => r.data),
+      .then((r) => { if ('accessToken' in r.data) announceSessionChange(); return r.data })),
 
   /** Finishes a 2FA-gated login: the challenge token from `login` plus the
    * 6-digit code from the authenticator app. */
   completeTwoFactorLogin: (challengeToken: string, code: string) =>
-    apiClient
+    withSessionLock(() => apiClient
       .post<Session>('/auth/2fa/login', { challengeToken, code })
-      .then((r) => r.data),
+      .then((r) => { announceSessionChange(); return r.data })),
 
   register: (data: RegisterPayload) =>
-    apiClient.post<Session>('/auth/register', data).then((r) => r.data),
+    withSessionLock(() => apiClient.post<Session>('/auth/register', data).then((r) => { announceSessionChange(); return r.data })),
 
   me: () => apiClient.get<User>('/auth/me').then((r) => r.data),
 
@@ -44,23 +45,38 @@ export const authApi = {
   // cookie the browser attaches and this code cannot read. That is the point —
   // see lib/stores/auth-store.ts. Session bootstrap goes through
   // `bootstrapSession` in ./client, which shares one in-flight refresh.
-  refresh: () =>
-    apiClient.post<Session>('/auth/refresh').then((r) => r.data),
+  refresh: async () => {
+    await refreshSession()
+    const { user, accessToken, expiresAt } = useAuthStore.getState()
+    if (!user || !accessToken || !expiresAt) throw new Error('No active session')
+    return { user, accessToken, expiresAt } satisfies Session
+  },
 
   // The server revokes the cookie's token and clears the cookie; without this
   // call, signing out would only drop client state and leave the session
   // rotatable by anyone who still held the token.
-  logout: () => apiClient.post('/auth/logout').then((r) => r.data),
+  logout: () => {
+    // Fence pending refreshes immediately, but retain the UI if revocation fails.
+    useAuthStore.setState((state) => ({ epoch: state.epoch + 1 }))
+    return withSessionLock(async () => {
+      const response = await apiClient.post('/auth/logout')
+      useAuthStore.getState().clearSession()
+      announceSessionChange()
+      return response.data
+    })
+  },
 
   /** Change the password, which signs every session out — including this one. */
   changePassword: (currentPassword: string, newPassword: string) =>
     apiClient
       .post<{ message: string }>('/auth/password', { currentPassword, newPassword })
-      .then((r) => r.data),
+      .then((r) => { useAuthStore.getState().clearSession(); announceSessionChange(); return r.data }),
 
   /** Every device with a live refresh token, for the Security page. */
   getSessions: () =>
     apiClient.get<ActiveSession[]>('/auth/sessions').then((r) => r.data),
+
+  revokeSession: (id: string) => apiClient.delete(`/auth/sessions/${id}`).then((r) => r.data),
 
   /** Starts 2FA enrollment: a new secret plus an otpauth:// URI to render as
    * a QR code. Not enabled until `verifyTwoFactor` confirms a code. */

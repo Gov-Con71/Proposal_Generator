@@ -1,5 +1,6 @@
 'use client'
 import { create } from 'zustand'
+import { clearPrivateState } from '@/lib/private-state'
 import type { User, Session } from '@/types'
 
 /**
@@ -25,9 +26,11 @@ import type { User, Session } from '@/types'
 interface AuthState {
   user: User | null
   accessToken: string | null
+  expiresAt: string | null
   isAuthenticated: boolean
   /** False until the first /auth/refresh bootstrap settles, either way. */
   isReady: boolean
+  epoch: number
   setSession: (session: Session) => void
   clearSession: () => void
   setReady: () => void
@@ -58,24 +61,33 @@ function setMarker(present: boolean) {
 export const useAuthStore = create<AuthState>()((set, get) => ({
   user: null,
   accessToken: null,
+  expiresAt: null,
   isAuthenticated: false,
   isReady: false,
+  epoch: 0,
 
   setSession: (session: Session) => {
+    const changed = get().user?.id !== session.user.id
+    if (changed) clearPrivateState()
     setMarker(true)
     set({
+      epoch: get().epoch + (changed ? 1 : 0),
       user: session.user,
       accessToken: session.accessToken,
+      expiresAt: session.expiresAt,
       isAuthenticated: true,
       isReady: true,
     })
   },
 
   clearSession: () => {
+    clearPrivateState()
     setMarker(false)
     set({
+      epoch: get().epoch + 1,
       user: null,
       accessToken: null,
+      expiresAt: null,
       isAuthenticated: false,
       isReady: true,
     })

@@ -131,7 +131,8 @@ def _refresh_with(test_client, raw: str | None):
     )
 
 
-def test_refresh_token_rotates_and_detects_reuse(test_client, cleanup_emails):
+def test_refresh_token_rotates_and_detects_reuse(test_client, cleanup_emails, monkeypatch):
+    monkeypatch.setattr(settings, "refresh_concurrency_seconds", 0)
     """Each refresh consumes the old token; replaying one kills the family."""
     email = f"auth_{uuid.uuid4().hex[:8]}@example.com"
     cleanup_emails.append(email)
@@ -306,9 +307,9 @@ def test_successful_login_clears_the_failure_budget(test_client, cleanup_emails,
     ).status_code == 401
 
 
-def test_rate_limiting_cannot_lock_a_victim_out(test_client, cleanup_emails, monkeypatch):
-    """Per-account throttling must not become a denial-of-service: an attacker
-    burning one account's budget must not affect a different account."""
+def test_account_rate_limit_blocks_target_without_blocking_bystanders(test_client, cleanup_emails, monkeypatch):
+    """An exhausted account bucket rejects even a valid password, but does not
+    affect a different account."""
     from app.core.config import settings as cfg
 
     monkeypatch.setattr(cfg, "login_max_failures_per_account", 3)

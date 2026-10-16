@@ -262,3 +262,29 @@ is going to the database.
 - `DATABASE_URL` must be set as a repository/environment secret for the deploy
   workflow's `migrate` job, or the deploy fails at that step by design.
 - `/metrics` is unauthenticated — keep it off the public internet (network ACL).
+
+## Session security migration
+
+Before deploying this version, configure a persistent `TOTP_ENCRYPTION_KEY`
+(Fernet key, generated with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`).
+Keep it in your secret store and backups. The API and migration process must use
+identical keys; changing it without re-encrypting stored secrets breaks 2FA.
+Staging and production require this key, a non-default JWT secret of at least
+32 bytes, secure cookies, and explicit HTTPS `CORS_ORIGINS`.
+
+Run `alembic upgrade head` from `backend` before starting the new API. Revision
+0018 encrypts existing TOTP secrets and revokes existing sessions. Users must
+sign in again. Apply this during a maintenance window so an older API process
+cannot continue writing plaintext secrets or issuing tokens without session IDs.
+Development derives an encryption key from the JWT secret if none is set; set
+an explicit key whenever you need secrets to survive JWT key changes.
+
+Access tokens now carry a stable session ID checked against live database
+sessions. Logout, device revocation, and password changes invalidate them on the
+next request. `SESSION_ABSOLUTE_EXPIRE_DAYS` defaults to 30 and caps both access
+and refresh tokens. Refresh and logout clients must send `X-CSRF-Protection: 1`;
+browser origins must exactly match `CORS_ORIGINS`. The included frontend does so.
+Refresh may return 409 `refresh_in_progress` for a recently rotated cookie;
+retry with the browser's latest cookie. It does not return credentials or set a
+cookie in that case. Replay outside the brief concurrency window revokes sessions.
+Sensitive account actions require Redis; if unavailable they return 503.

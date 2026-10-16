@@ -185,3 +185,164 @@ describe('bootstrapSession', () => {
     expect(useAuthStore.getState().isReady).toBe(true)
   })
 })
+
+it('sends the CSRF header when refreshing', async () => {
+  const { refreshSession } = await loadClient()
+  let header: string | null = null
+  server.use(http.post(`${API}/auth/refresh`, ({ request }) => {
+    header = request.headers.get('x-csrf-protection')
+    return HttpResponse.json({ user: { id: 'u1' }, accessToken: 'fresh', expiresAt: '' })
+  }))
+  await refreshSession()
+  expect(header).toBe('1')
+})
+
+it('retries a concurrency conflict using the latest browser cookie', async () => {
+  const { refreshSession } = await loadClient()
+  let calls = 0
+  server.use(http.post(`${API}/auth/refresh`, () => {
+    calls++
+    return calls === 1
+      ? HttpResponse.json({ detail: { code: 'refresh_in_progress' } }, { status: 409 })
+      : HttpResponse.json({ user: { id: 'u1' }, accessToken: 'fresh', expiresAt: '' })
+  }))
+  await expect(refreshSession()).resolves.toBe('fresh')
+  expect(calls).toBe(2)
+})
+
+it('does not restore a session from a refresh that finishes after logout', async () => {
+  const { refreshSession, useAuthStore } = await loadClient()
+  let release!: () => void
+  let started!: () => void
+  const entered = new Promise<void>((resolve) => { started = resolve })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  server.use(http.post(`${API}/auth/refresh`, async () => {
+    started()
+    await gate
+    return HttpResponse.json({ user: { id: 'u1' }, accessToken: 'late', expiresAt: '' })
+  }))
+  const refresh = refreshSession()
+  const rejected = expect(refresh).rejects.toMatchObject({ code: 'ERR_CANCELED' })
+  await entered
+  useAuthStore.getState().clearSession()
+  release()
+  await rejected
+  expect(useAuthStore.getState().isAuthenticated).toBe(false)
+})
+
+it('rejects a private response that arrives after an account switch', async () => {
+  const { apiClient, useAuthStore } = await loadClient()
+  useAuthStore.getState().setSession({ user: { id: 'u1' }, accessToken: 'first' } as never)
+  let release!: () => void
+  let started!: () => void
+  const entered = new Promise<void>((resolve) => { started = resolve })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  server.use(http.get(`${API}/protected`, async () => {
+    started()
+    await gate
+    return HttpResponse.json({ private: 'first user data' })
+  }))
+  const request = apiClient.get('/protected')
+  const rejected = expect(request).rejects.toMatchObject({ code: 'ERR_CANCELED' })
+  await entered
+  useAuthStore.getState().setSession({ user: { id: 'u2' }, accessToken: 'second' } as never)
+  release()
+  await rejected
+})
+
+it('keeps a valid session when disabling 2FA uses the wrong password', async () => {
+  const { apiClient, useAuthStore } = await loadClient()
+  useAuthStore.getState().setSession({ user: { id: 'u1' }, accessToken: 'valid' } as never)
+  server.use(http.post(`${API}/auth/2fa/disable`, () => HttpResponse.json({
+    detail: { code: 'incorrect_current_password', message: 'Your password is incorrect.' },
+  }, { status: 401 })))
+  await expect(apiClient.post('/auth/2fa/disable')).rejects.toBeTruthy()
+  expect(refreshCalls).toBe(0)
+  expect(useAuthStore.getState().accessToken).toBe('valid')
+})
+
+it('uses the same browser lock for refreshes from separate tabs', async () => {
+  const names: string[] = []
+  let queue = Promise.resolve()
+  vi.stubGlobal('navigator', { locks: {
+    request: (name: string, action: () => Promise<unknown>) => {
+      names.push(name)
+      const result = queue.then(action)
+      queue = result.then(() => undefined, () => undefined)
+      return result
+    },
+  } })
+  try {
+    const tab1 = await loadClient()
+    vi.resetModules()
+    const tab2 = await loadClient()
+    let active = 0
+    let maximum = 0
+    server.use(http.post(`${API}/auth/refresh`, async () => {
+      active++
+      maximum = Math.max(maximum, active)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      active--
+      return HttpResponse.json({ user: { id: 'u1' }, accessToken: 'fresh', expiresAt: '' })
+    }))
+    await Promise.all([tab1.refreshSession(), tab2.refreshSession()])
+    expect(names).toEqual([`proposalai-session:${API}`, `proposalai-session:${API}`])
+    expect(maximum).toBe(1)
+  } finally {
+    vi.unstubAllGlobals()
+  }
+})
+
+it('keeps the session available for retry when server logout fails', async () => {
+  const { useAuthStore } = await loadClient()
+  const { authApi } = await import('@/lib/api')
+  useAuthStore.getState().setSession({ user: { id: 'u1' }, accessToken: 'valid' } as never)
+  server.use(http.post(`${API}/auth/logout`, () => HttpResponse.json({ detail: 'Unavailable' }, { status: 503 })))
+  await expect(authApi.logout()).rejects.toBeTruthy()
+  expect(useAuthStore.getState().isAuthenticated).toBe(true)
+  expect(useAuthStore.getState().accessToken).toBe('valid')
+})
+
+it('serializes logout after an in-flight refresh and prevents session resurrection', async () => {
+  let queue = Promise.resolve()
+  vi.stubGlobal('navigator', { locks: {
+    request: (_name: string, action: () => Promise<unknown>) => {
+      const result = queue.then(action)
+      queue = result.then(() => undefined, () => undefined)
+      return result
+    },
+  } })
+  try {
+    const { refreshSession, useAuthStore } = await loadClient()
+    const { authApi } = await import('@/lib/api')
+    const order: string[] = []
+    let release!: () => void
+    let started!: () => void
+    const entered = new Promise<void>((resolve) => { started = resolve })
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    server.use(
+      http.post(`${API}/auth/refresh`, async () => {
+        order.push('refresh')
+        started()
+        await gate
+        return HttpResponse.json({ user: { id: 'u1' }, accessToken: 'late', expiresAt: '' })
+      }),
+      http.post(`${API}/auth/logout`, () => {
+        order.push('logout')
+        return HttpResponse.json({ message: 'Session cleared.' })
+      }),
+    )
+    const refresh = refreshSession()
+    const rejected = expect(refresh).rejects.toMatchObject({ code: 'ERR_CANCELED' })
+    await entered
+    const logout = authApi.logout()
+    expect(order).toEqual(['refresh'])
+    release()
+    await rejected
+    await logout
+    expect(order).toEqual(['refresh', 'logout'])
+    expect(useAuthStore.getState().isAuthenticated).toBe(false)
+  } finally {
+    vi.unstubAllGlobals()
+  }
+})

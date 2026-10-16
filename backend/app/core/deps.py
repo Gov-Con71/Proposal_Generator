@@ -8,7 +8,7 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.core.security import decode_token
+from app.core.security import decode_access_claims
 
 # auto_error=False so we can raise a consistent 401 ourselves.
 _bearer = HTTPBearer(auto_error=False)
@@ -16,8 +16,8 @@ _bearer = HTTPBearer(auto_error=False)
 
 def _subject_from_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> UUID:
-    """Validates the bearer token's signature and returns its subject.
+) -> tuple[UUID, UUID]:
+    """Validates the bearer token and returns its user and session IDs.
 
     Signature only — it says nothing about whether the account still exists or
     is still permitted to act. `get_current_user` is what decides that.
@@ -29,8 +29,9 @@ def _subject_from_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
     try:
-        return UUID(decode_token(credentials.credentials))
-    except (jwt.PyJWTError, ValueError) as exc:
+        claims = decode_access_claims(credentials.credentials)
+        return UUID(claims["sub"]), UUID(claims["sid"])
+    except (jwt.PyJWTError, ValueError, KeyError, TypeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token.",
@@ -38,7 +39,7 @@ def _subject_from_token(
         ) from exc
 
 
-def get_current_user(user_id: UUID = Depends(_subject_from_token)) -> dict:
+def get_current_user(identity: tuple[UUID, UUID] = Depends(_subject_from_token)) -> dict:
     """Loads the authenticated user's record, rejecting deactivated accounts.
 
     Roles and active status are read from the database, never from the token, so
@@ -47,18 +48,17 @@ def get_current_user(user_id: UUID = Depends(_subject_from_token)) -> dict:
     a user holding a live token never performs again — so switching an account
     off did nothing at all (GAP_ANALYSIS §4.4).
 
-    This costs one indexed primary-key lookup per authenticated request. That is
-    the price of revoking a stateless JWT: the alternative is a deactivated
-    account that keeps working until its token expires, and "we can't lock this
-    person out for another quarter of an hour" is not an acceptable answer to an
-    offboarding. FastAPI caches the dependency per request, so a route that also
-    needs the role does not pay for it twice.
+    Account status and the token's stable session ID are checked against the
+    database. FastAPI caches this dependency within each request.
     """
     # Imported here to keep the module import graph free of a service cycle.
     from app.services import user_service
 
+    from app.services import refresh_token_service
+
+    user_id, session_id = identity
     user = user_service.get_active_user(user_id)
-    if user is None:
+    if user is None or not refresh_token_service.is_active_session(user_id, session_id):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="This account is no longer active.",

@@ -6,9 +6,9 @@ deploy and be trivially evaded by hitting another replica).
 
 Two deliberate choices:
 
-* **Only failures are counted.** A user who types the right password is never
-  throttled, and an attacker cannot lock a victim out of their own account by
-  burning the budget with deliberate failures.
+* Login counts failures. A bucket over its limit rejects all attempts for the
+  remaining window, including correct passwords. Sensitive actions count all
+  attempts atomically and fail closed if Redis is unavailable.
 * **Fails open.** If Redis is unreachable the request is allowed, matching
   `core/cache.py`. A Redis blip must not lock every user out of the product.
   The trade-off is explicit: availability over throttling, logged at WARNING.
@@ -94,3 +94,21 @@ def client_ip(request) -> str:
     per-account limit below is the primary control and this is secondary.
     """
     return request.client.host if request.client else "unknown"
+
+
+def require_attempt(bucket: str, identifier: str, limit: int, window_seconds: int) -> None:
+    """Reserve one sensitive attempt atomically before expensive verification."""
+    from fastapi import HTTPException
+    if not settings.rate_limit_enabled:
+        return
+    try:
+        count, ttl = _redis().eval("""
+            local n = redis.call('INCR', KEYS[1])
+            if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+            return {n, redis.call('TTL', KEYS[1])}
+        """, 1, _key(bucket, identifier), window_seconds)
+    except Exception as exc:
+        logger.warning("Sensitive action throttling unavailable")
+        raise HTTPException(503, "Security checks temporarily unavailable. Try again shortly.") from exc
+    if count > limit:
+        raise HTTPException(429, "Too many attempts. Try again shortly.", headers={"Retry-After": str(max(ttl, 1))})

@@ -165,6 +165,21 @@ export default function SecurityPage() {
 
 function ActiveSessionsList() {
   const { data: sessions, isLoading, isError, error, refetch } = useActiveSessions()
+  const [revoking, setRevoking] = useState<string | null>(null)
+  const [revokeError, setRevokeError] = useState<string | null>(null)
+
+  async function revoke(id: string) {
+    setRevoking(id)
+    setRevokeError(null)
+    try {
+      await authApi.revokeSession(id)
+      await refetch()
+    } catch {
+      setRevokeError('Could not sign out this device. Please try again.')
+    } finally {
+      setRevoking(null)
+    }
+  }
 
   if (isLoading) {
     return (
@@ -183,6 +198,7 @@ function ActiveSessionsList() {
   }
   return (
     <>
+      {revokeError && <p role="alert" className="text-xs text-danger-600">{revokeError}</p>}
       {sessions.map((s: ActiveSession) => (
         <div key={s.id} className="flex items-center justify-between py-2 border-t border-[var(--border-subtle)]">
           <div>
@@ -191,6 +207,9 @@ function ActiveSessionsList() {
               {s.ipAddress ?? 'Unknown location'} · {s.isCurrent ? 'Active now' : formatRelative(s.createdAt)}
             </p>
           </div>
+          {!s.isCurrent && <Button size="sm" variant="default" disabled={revoking !== null} onClick={() => void revoke(s.id)}>
+            {revoking === s.id ? 'Signing out…' : 'Sign out'}
+          </Button>}
           {s.isCurrent && (
             <span className="text-[10px] px-2 py-0.5 bg-success-50 text-success-600 rounded font-medium">Current</span>
           )}
@@ -258,8 +277,7 @@ function TwoFactorCard() {
       updateUser({ totpEnabled: false })
       reset()
     } catch (err) {
-      const status = (err as { response?: { status?: number } }).response?.status
-      setError(status === 401 ? 'Your password is incorrect.' : 'Could not disable. Please try again.')
+      setError(authError(err, 'Could not disable. Please try again.').message)
       setBusy(false)
     }
   }

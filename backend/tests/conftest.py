@@ -5,7 +5,7 @@ from app.main import app
 @pytest.fixture(scope="module")
 def test_client():
     """Provides isolated instantiation wrapper for endpoint queries."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-CSRF-Protection": "1"}) as client:
         yield client
 
 

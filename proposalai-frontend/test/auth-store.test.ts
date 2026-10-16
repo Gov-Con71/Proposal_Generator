@@ -74,3 +74,34 @@ describe('lifecycle', () => {
     expect(useAuthStore.getState().isReady).toBe(true)
   })
 })
+
+import { QueryClient } from '@tanstack/react-query'
+import { registerPrivateCache } from '@/lib/private-state'
+import { useProposalStore } from '@/lib/stores/Proposal-store'
+
+it('clears private query and proposal state on logout', () => {
+  const cache = new QueryClient()
+  const unregister = registerPrivateCache(cache)
+  useAuthStore.getState().setSession(SESSION)
+  cache.setQueryData(['profile'], { name: 'Private company' })
+  useProposalStore.getState().setActiveProposal({ id: 'private-proposal' } as never)
+  useAuthStore.getState().clearSession()
+  expect(cache.getQueryData(['profile'])).toBeUndefined()
+  expect(useProposalStore.getState().activeProposal).toBeNull()
+  unregister()
+})
+
+it('clears private caches when the account changes but preserves them on refresh', () => {
+  const cache = new QueryClient()
+  const unregister = registerPrivateCache(cache)
+  useAuthStore.getState().setSession(SESSION)
+  cache.setQueryData(['proposals'], ['private'])
+  const epoch = useAuthStore.getState().epoch
+  useAuthStore.getState().setSession(SESSION)
+  expect(cache.getQueryData(['proposals'])).toEqual(['private'])
+  expect(useAuthStore.getState().epoch).toBe(epoch)
+  useAuthStore.getState().setSession({ ...SESSION as object, user: { id: 'u2' } } as never)
+  expect(cache.getQueryData(['proposals'])).toBeUndefined()
+  expect(useAuthStore.getState().epoch).toBeGreaterThan(epoch)
+  unregister()
+})

@@ -1,5 +1,6 @@
 'use client'
 import Link from 'next/link'
+import { useEffect, useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import {
   ShieldCheck, LayoutDashboard, PenLine, Table2,
@@ -47,8 +48,14 @@ function initialsOf(name?: string, email?: string) {
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
-  const clearSession = useAuthStore((s) => s.clearSession)
+  const [logoutError, setLogoutError] = useState<string | null>(null)
   const user = useAuthStore((s) => s.user)
+  const isReady = useAuthStore((s) => s.isReady)
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+
+  useEffect(() => {
+    if (isReady && !isAuthenticated) router.replace('/login')
+  }, [isReady, isAuthenticated, router])
 
   // The proposal currently open, if any: /proposals/{id}/… where id is a real
   // id and not the "new" flow. Drives the contextual Workspace/Compliance links.
@@ -77,16 +84,17 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     // Revoke server-side first so the refresh token can't be rotated again;
     // clearing local state alone would leave the session alive for 30 days.
     // No argument: the token travels as the HttpOnly cookie.
+    setLogoutError(null)
     try {
       await authApi.logout()
     } catch {
-      // A failed revoke must not strand the user in a session they've left.
+      setLogoutError('Could not sign out. Please try again.')
+      return
     }
-    // Clears in-memory state and the route-guard marker; the server already
-    // revoked the refresh token and expired its HttpOnly cookie.
-    clearSession()
     router.push('/login')
   }
+
+  if (!isReady || !isAuthenticated) return <div role="status" className="p-6">Loading session…</div>
 
   return (
     <div className="min-h-screen bg-[var(--bg-secondary)]">
@@ -176,6 +184,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             <Link href="#" className="flex items-center gap-2.5 mx-2 px-2 py-1.5 rounded text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)] transition-colors">
               <HelpCircle className="w-3.5 h-3.5" /> Help
             </Link>
+            {logoutError && <p role="alert" className="px-4 text-xs text-danger-600">{logoutError}</p>}
             <button onClick={handleLogout} className="w-full flex items-center gap-2.5 mx-2 px-2 py-1.5 rounded text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)] transition-colors">
               <LogOut className="w-3.5 h-3.5" /> Logout
             </button>

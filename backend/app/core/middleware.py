@@ -242,16 +242,19 @@ def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError):
         request_id = _request_id_of(request)
+        # Pydantic's input and ctx may contain passwords, tokens or whole bodies.
+        errors = [{key: err[key] for key in ("type", "loc", "msg") if key in err}
+                  for err in exc.errors()]
         logger.warning(
             "422 on %s %s: %d validation error(s)",
             request.method,
             request.url.path,
             len(exc.errors()),
-            extra={"validation_errors": exc.errors()},
+            extra={"validation_errors": errors},
         )
         return JSONResponse(
             status_code=422,
-            content={"detail": exc.errors(), "requestId": request_id},
+            content={"detail": errors, "requestId": request_id},
         )
 
     @app.exception_handler(Exception)
