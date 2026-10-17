@@ -17,17 +17,21 @@ script, and the script-readable credential is short-lived.
 """
 
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Union
 from uuid import UUID
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
+from app.core.csrf import protect_auth_request
 
 from app.core import rate_limit
 from app.core.config import settings
 from app.core.deps import get_current_user, get_current_user_id, require_role
-from app.core.password_policy import WeakPasswordError, validate_password
+from app.core.password_policy import (
+    MAX_PASSWORD_BYTES, MIN_DISTINCT_CHARACTERS, WeakPasswordError, validate_password,
+)
 from app.core.security import (
     create_access_token,
     create_two_factor_challenge_token,
@@ -39,6 +43,7 @@ from app.models.contract import (
     LoginRequest,
     MessageResponse,
     PasswordChangeRequest,
+    PasswordPolicyResponse,
     RegisterRequest,
     Session,
     SetActiveRequest,
@@ -55,7 +60,32 @@ from app.services import user_service as users
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/auth", tags=["Auth"])
+router = APIRouter(prefix="/auth", tags=["Auth"], dependencies=[Depends(protect_auth_request)])
+
+
+def _sensitive_attempt(user_id, bucket="security_password"):
+    rate_limit.require_attempt(bucket, str(user_id), settings.sensitive_max_attempts, settings.sensitive_window_seconds)
+
+
+def _access_for_session(user_id, raw):
+    session = refresh_tokens.session_for_token(raw)
+    return create_access_token(str(user_id), session_id=str(session["session_id"]),
+                               session_expires_at=session["session_expires_at"])
+
+
+def _rejected_refresh(detail: str):
+    response = JSONResponse(status_code=401, content={"detail": detail})
+    _clear_refresh_cookie(response)
+    return response
+
+
+@router.get("/password-policy", response_model=PasswordPolicyResponse)
+def password_policy() -> PasswordPolicyResponse:
+    return PasswordPolicyResponse(
+        min_length=settings.password_min_length,
+        max_bytes=MAX_PASSWORD_BYTES,
+        min_distinct_characters=MIN_DISTINCT_CHARACTERS,
+    )
 
 
 def _set_refresh_cookie(response: Response, raw_token: str) -> None:
@@ -67,10 +97,12 @@ def _set_refresh_cookie(response: Response, raw_token: str) -> None:
     settings because the dev and production topologies need different ones; see
     the comment on `Settings.refresh_cookie_name`.
     """
+    session = refresh_tokens.session_for_token(raw_token)
+    remaining = int((session["session_expires_at"] - datetime.now(timezone.utc)).total_seconds())
     response.set_cookie(
         key=settings.refresh_cookie_name,
         value=raw_token,
-        max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
+        max_age=max(0, min(settings.refresh_token_expire_days * 24 * 60 * 60, remaining)),
         httponly=True,
         secure=settings.cookie_secure,
         samesite=settings.cookie_samesite,
@@ -94,12 +126,16 @@ def _clear_refresh_cookie(response: Response) -> None:
 
 def _open_session(user: dict, request: Request, response: Response) -> Session:
     """Issues an access token in the body and a refresh token in the cookie."""
-    token, expire = create_access_token(user["id"])
-    raw = refresh_tokens.issue(
-        user["id"],
-        user_agent=request.headers.get("user-agent"),
-        ip_address=rate_limit.client_ip(request),
-    )
+    try:
+        raw = refresh_tokens.issue(
+            user["id"],
+            user_agent=request.headers.get("user-agent"),
+            ip_address=rate_limit.client_ip(request),
+            expected_auth_version=user["auth_version"],
+        )
+    except refresh_tokens.InvalidRefreshTokenError as exc:
+        raise HTTPException(401, "Credentials changed. Please sign in again.") from exc
+    token, expire = _access_for_session(user["id"], raw)
     _set_refresh_cookie(response, raw)
     return Session(
         user=User(**user),
@@ -187,8 +223,8 @@ def login(
     try:
         user = users.authenticate(payload.email, payload.password)
     except users.InvalidCredentialsError as exc:
-        # Count only failures, so a correct password is never throttled and an
-        # attacker cannot lock a victim out by exhausting their budget.
+        # Count failures. Exhausted buckets reject every attempt until expiry,
+        # including correct passwords, to bound guessing and bcrypt work.
         rate_limit.record_failure("login_account", account, window)
         rate_limit.record_failure("login_ip", ip, window)
         raise HTTPException(
@@ -201,7 +237,7 @@ def login(
         # Password checked out, but the session stays closed until the code
         # does too — no cookie, no access token, nothing usable yet.
         return TwoFactorChallenge(
-            challenge_token=create_two_factor_challenge_token(user["id"])
+            challenge_token=create_two_factor_challenge_token(user["id"], user["auth_version"])
         )
     return _open_session(user, request, response)
 
@@ -221,8 +257,9 @@ def two_factor_login(
     check the code.
     """
     try:
-        user_id = decode_two_factor_challenge_token(payload.challenge_token)
-    except (jwt.PyJWTError, ValueError) as exc:
+        user_id, auth_version = decode_two_factor_challenge_token(payload.challenge_token)
+        UUID(user_id)
+    except (jwt.PyJWTError, ValueError, KeyError, TypeError) as exc:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "That sign-in attempt has expired. Please sign in again."
         ) from exc
@@ -238,7 +275,7 @@ def two_factor_login(
             headers={"Retry-After": str(retry_after)},
         )
 
-    if not totp.verify_login_code(UUID(user_id), payload.code):
+    if not totp.verify_login_code(UUID(user_id), payload.code, auth_version):
         rate_limit.record_failure(
             "totp_login", user_id, settings.totp_failure_window_seconds
         )
@@ -246,8 +283,8 @@ def two_factor_login(
     rate_limit.reset("totp_login", user_id)
 
     user = users.get_active_user(UUID(user_id))
-    if user is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This account is no longer active.")
+    if user is None or user["auth_version"] != auth_version:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credentials changed. Please sign in again.")
     return _open_session(user, request, response)
 
 
@@ -285,6 +322,22 @@ def list_sessions(request: Request, user_id=Depends(get_current_user_id)) -> lis
     ]
 
 
+@router.delete("/sessions/{session_id}", response_model=MessageResponse)
+def revoke_device(session_id: UUID, request: Request, response: Response,
+                  user_id=Depends(get_current_user_id)) -> MessageResponse:
+    if not refresh_tokens.revoke_session(user_id, session_id):
+        raise HTTPException(404, "Session not found.")
+    raw = request.cookies.get(settings.refresh_cookie_name)
+    if raw:
+        try:
+            current = refresh_tokens.session_for_token(raw)
+            if str(current["session_id"]) == str(session_id):
+                _clear_refresh_cookie(response)
+        except refresh_tokens.InvalidRefreshTokenError:
+            pass
+    return MessageResponse(message="Device signed out.")
+
+
 @router.post(
     "/refresh",
     response_model=Session,
@@ -308,13 +361,12 @@ def refresh(request: Request, response: Response) -> Session:
             user_agent=request.headers.get("user-agent"),
             ip_address=rate_limit.client_ip(request),
         )
-    except refresh_tokens.InvalidRefreshTokenError as exc:
-        # Clear it: keeping a cookie the server rejects means every subsequent
-        # bootstrap re-attempts a token that can never work again.
-        _clear_refresh_cookie(response)
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, "Invalid or expired session."
-        ) from exc
+    except refresh_tokens.ConcurrentRefreshError:
+        # Never clear or overwrite the cookie installed by the winning request.
+        return JSONResponse(status_code=409, content={"detail": {"code": "refresh_in_progress"}},
+                            headers={"Retry-After": "1"})
+    except refresh_tokens.InvalidRefreshTokenError:
+        return _rejected_refresh("Invalid or expired session.")
 
     user = users.get_active_user(user_id)
     if user is None:
@@ -322,10 +374,9 @@ def refresh(request: Request, response: Response) -> Session:
         # what makes deactivation stick: without it the holder could keep
         # rotating indefinitely.
         refresh_tokens.revoke(new_refresh)
-        _clear_refresh_cookie(response)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This account is no longer active.")
+        return _rejected_refresh("This account is no longer active.")
 
-    token, expire = create_access_token(user["id"])
+    token, expire = _access_for_session(user["id"], new_refresh)
     _set_refresh_cookie(response, new_refresh)
     return Session(
         user=User(**user),
@@ -336,9 +387,7 @@ def refresh(request: Request, response: Response) -> Session:
 
 @router.post("/logout", response_model=MessageResponse, summary="Revoke the session")
 def logout(request: Request, response: Response) -> MessageResponse:
-    """Revokes the refresh token and clears the cookie. The access token stays
-    valid until it expires — inherent to stateless JWTs, and why the access
-    lifetime is 15 minutes against the refresh token's 30 days."""
+    """Revokes the refresh token and clears the cookie. Access tokens carry the stable session ID and become unusable immediately."""
     raw = request.cookies.get(settings.refresh_cookie_name)
     if raw:
         refresh_tokens.revoke(raw)
@@ -369,16 +418,19 @@ def change_password(
     except WeakPasswordError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
+    _sensitive_attempt(user_id)
     try:
         users.change_password(user_id, payload.current_password, payload.new_password)
     except users.InvalidCredentialsError as exc:
         raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, "Your current password is incorrect."
+            status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "code": "incorrect_current_password",
+                "message": "Your current password is incorrect.",
+            },
         ) from exc
 
-    revoked = refresh_tokens.revoke_all_for_user(user_id)
     _clear_refresh_cookie(response)
-    logger.info("Password change revoked %d refresh token(s) for %s", revoked, user_id)
     return MessageResponse(
         message="Password updated. Sign in again to continue."
     )
@@ -392,6 +444,7 @@ def change_password(
 def setup_two_factor(user: dict = Depends(get_current_user)) -> TwoFactorSetupResponse:
     """Generates a new TOTP secret and returns it plus an otpauth:// URI for a
     QR code. Not enabled yet — /2fa/verify confirms it."""
+    _sensitive_attempt(user["id"], "totp_enrollment")
     try:
         secret, uri = totp.start_enrollment(UUID(user["id"]), user["email"])
     except totp.TwoFactorAlreadyEnabledError as exc:
@@ -411,6 +464,7 @@ def verify_two_factor(
     payload: TwoFactorVerifyRequest, user_id=Depends(get_current_user_id)
 ) -> MessageResponse:
     """Proves the caller saved the secret from /2fa/setup, then turns 2FA on."""
+    _sensitive_attempt(user_id, "totp_enrollment")
     try:
         totp.confirm_enrollment(user_id, payload.code)
     except totp.InvalidCodeError as exc:
@@ -432,13 +486,14 @@ def disable_two_factor(
     """Requires the account password, not just the bearer token — otherwise a
     15-minute access token stolen from an unattended tab would be enough to
     strip the second factor protecting the account."""
+    _sensitive_attempt(user_id)
     try:
-        users.verify_password_for(user_id, payload.password)
+        totp.disable(user_id, payload.password)
     except users.InvalidCredentialsError as exc:
         raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, "Your password is incorrect."
+            status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "incorrect_current_password", "message": "Your password is incorrect."},
         ) from exc
-    totp.disable(user_id)
     return MessageResponse(message="Two-factor authentication is now disabled.")
 
 
@@ -449,18 +504,16 @@ def disable_two_factor(
     dependencies=[Depends(require_role("admin"))],
 )
 def set_user_active(
-    target_id: str, payload: SetActiveRequest, actor_id=Depends(get_current_user_id)
+    target_id: UUID, payload: SetActiveRequest, actor_id=Depends(get_current_user_id)
 ) -> User:
     """Gives `users.is_active` a writer.
 
     It has gated every login since Sprint 7 and been settable by nothing
     (GAP_ANALYSIS §4.4), so an account could be created and never shut off.
 
-    Deactivating also revokes the target's refresh tokens, which is what bounds
-    their remaining access to one access-token lifetime (15 minutes) rather than
-    to the 30-day refresh window.
+    Deactivation revokes sessions atomically; protected requests reject the account immediately.
     """
-    if str(actor_id) == target_id and not payload.is_active:
+    if actor_id == target_id and not payload.is_active:
         # Locking yourself out of the only admin account is unrecoverable
         # without database access.
         raise HTTPException(
@@ -470,6 +523,4 @@ def set_user_active(
     user = users.set_active(target_id, payload.is_active)
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found.")
-    if not payload.is_active:
-        refresh_tokens.revoke_all_for_user(target_id)
     return User(**user)

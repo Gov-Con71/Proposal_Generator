@@ -23,7 +23,7 @@ import psycopg2
 import pytest
 
 from app.core.config import settings
-from app.core.security import create_access_token
+from auth_helpers import create_access_token
 
 
 def _conn():

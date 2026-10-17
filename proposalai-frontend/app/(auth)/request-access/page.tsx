@@ -1,10 +1,12 @@
 'use client'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { ShieldCheck, ArrowLeft, AlertTriangle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { PasswordRequirements, usePasswordPolicy } from '@/components/ui/password-requirements'
+import { authError, passwordError } from '@/lib/password-validation'
 import { authApi } from '@/lib/api'
 import { useAuthStore } from '@/lib/stores/auth-store'
 
@@ -14,6 +16,9 @@ export default function RequestAccessPage() {
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const policy = usePasswordPolicy()
+  const passwordRef = useRef<HTMLInputElement>(null)
+  const [fieldError, setFieldError] = useState('')
   const [org, setOrg] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -21,10 +26,14 @@ export default function RequestAccessPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError('')
-    if (!name || !email || !password) {
-      setError('Name, email, and password are required.')
+    if (!name.trim() || !email) {
+      setError('Name and email are required.')
+      e.currentTarget.querySelector<HTMLInputElement>(!name.trim() ? '#full-name' : '#work-email')?.focus()
       return
     }
+    const invalid = passwordError(password, policy)
+    setFieldError(invalid)
+    if (invalid) { passwordRef.current?.focus(); return }
     const [firstName, ...rest] = name.trim().split(' ')
     setLoading(true)
     try {
@@ -41,11 +50,13 @@ export default function RequestAccessPage() {
       setSession(session)
       router.push('/dashboard')
     } catch (err) {
-      const status = (err as { response?: { status?: number } }).response?.status
-      setError(
-        status === 409 ? 'An account with that email already exists.'
-        : 'Could not create your account. Please try again.'
-      )
+      const failure = authError(err, 'Could not create your account. Please try again.')
+      if (failure.status === 422 && (!failure.field || failure.field === 'password')) {
+        setFieldError(failure.message)
+        passwordRef.current?.focus()
+      } else {
+        setError(failure.status === 409 ? 'An account with that email already exists.' : failure.message)
+      }
       setLoading(false)
     }
   }
@@ -66,14 +77,17 @@ export default function RequestAccessPage() {
         </p>
 
         <div className="flex flex-col gap-3 mb-5">
-          <Input label="Full name"    type="text"     placeholder="Jane Smith"       value={name}     onChange={(e) => setName(e.target.value)} />
-          <Input label="Work email"   type="email"    placeholder="jane@company.gov" value={email}    onChange={(e) => setEmail(e.target.value)} />
-          <Input label="Password"     type="password" placeholder="••••••••"          value={password} onChange={(e) => setPassword(e.target.value)} />
+          <Input label="Full name"    type="text"     placeholder="Jane Smith"       value={name}     onChange={(e) => { setName(e.target.value); setFieldError(''); setError('') }} />
+          <Input label="Work email"   type="email"    placeholder="jane@company.gov" value={email}    onChange={(e) => { setEmail(e.target.value); setFieldError(''); setError('') }} />
+          <Input label="Password"     type="password" placeholder="••••••••"          value={password} ref={passwordRef} error={fieldError} autoComplete="new-password"
+            aria-describedby="register-password-requirements"
+            onChange={(e) => { setPassword(e.target.value); setFieldError('') }} />
+          <PasswordRequirements id="register-password-requirements" password={password} policy={policy} registration />
           <Input label="Organization" type="text"     placeholder="Acro Inc."        value={org}      onChange={(e) => setOrg(e.target.value)} />
         </div>
 
         {error && (
-          <div className="flex items-center gap-2 mb-4 px-3 py-2.5 bg-danger-50 border border-danger-200 rounded-lg">
+          <div role="alert" className="flex items-center gap-2 mb-4 px-3 py-2.5 bg-danger-50 border border-danger-200 rounded-lg">
             <AlertTriangle className="w-4 h-4 text-danger-600 shrink-0" />
             <p className="text-xs text-danger-700">{error}</p>
           </div>

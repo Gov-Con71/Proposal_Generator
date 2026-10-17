@@ -30,7 +30,7 @@ import pytest
 from moto import mock_aws
 
 from app.core.config import settings
-from app.core.security import create_access_token
+from auth_helpers import create_access_token
 from app.services import export_renderer, export_service
 
 

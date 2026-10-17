@@ -17,6 +17,7 @@ from psycopg2.extras import RealDictCursor
 
 from app.core.config import settings
 from app.core.db import get_connection
+from app.core.secret_encryption import encrypt_secret, decrypt_secret
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def start_enrollment(user_id: UUID, email: str) -> tuple[str, str]:
             cur.execute(
                 "UPDATE users SET totp_secret = %s, totp_last_used_step = NULL "
                 "WHERE user_id = %s;",
-                (secret, str(user_id)),
+                (encrypt_secret(secret), str(user_id)),
             )
     finally:
         conn.close()
@@ -68,19 +69,19 @@ def confirm_enrollment(user_id: UUID, code: str) -> None:
     try:
         with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT totp_secret, totp_last_used_step FROM users "
+                "SELECT totp_secret, totp_last_used_step, totp_enabled FROM users "
                 "WHERE user_id = %s FOR UPDATE;",
                 (str(user_id),),
             )
             row = cur.fetchone()
-            secret = row["totp_secret"] if row else None
-            if secret is None:
+            secret = decrypt_secret(row["totp_secret"]) if row and row["totp_secret"] else None
+            if secret is None or row["totp_enabled"]:
                 raise InvalidCodeError(str(user_id))
             step = _verify_and_get_step(secret, code, row["totp_last_used_step"])
             if step is None:
                 raise InvalidCodeError(str(user_id))
             cur.execute(
-                "UPDATE users SET totp_enabled = TRUE, totp_last_used_step = %s "
+                "UPDATE users SET totp_enabled = TRUE, auth_version = auth_version + 1, totp_last_used_step = %s "
                 "WHERE user_id = %s;",
                 (step, str(user_id)),
             )
@@ -89,22 +90,22 @@ def confirm_enrollment(user_id: UUID, code: str) -> None:
     logger.info("2FA enabled for user %s", user_id)
 
 
-def verify_login_code(user_id: UUID, code: str) -> bool:
+def verify_login_code(user_id: UUID, code: str, expected_auth_version: int) -> bool:
     """Checks `code` for a user whose 2FA is already enabled, as the second
     step of login. Consumes the matched time step so it cannot be replayed."""
     conn = get_connection()
     try:
         with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT totp_secret, totp_enabled, totp_last_used_step FROM users "
+                "SELECT totp_secret, totp_enabled, totp_last_used_step, auth_version, is_active FROM users "
                 "WHERE user_id = %s FOR UPDATE;",
                 (str(user_id),),
             )
             row = cur.fetchone()
-            if row is None or not row["totp_enabled"] or row["totp_secret"] is None:
+            if row is None or not row["is_active"] or row["auth_version"] != expected_auth_version or not row["totp_enabled"] or row["totp_secret"] is None:
                 return False
             step = _verify_and_get_step(
-                row["totp_secret"], code, row["totp_last_used_step"]
+                decrypt_secret(row["totp_secret"]), code, row["totp_last_used_step"]
             )
             if step is None:
                 return False
@@ -117,12 +118,18 @@ def verify_login_code(user_id: UUID, code: str) -> bool:
     return True
 
 
-def disable(user_id: UUID) -> None:
+def disable(user_id: UUID, password: str) -> None:
     conn = get_connection()
     try:
-        with conn, conn.cursor() as cur:
+        with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            from app.core.security import verify_password
+            from app.services.user_service import InvalidCredentialsError
+            cur.execute("SELECT password_hash, is_active FROM users WHERE user_id = %s FOR UPDATE;", (str(user_id),))
+            row = cur.fetchone()
+            if not row or not row["is_active"] or not verify_password(password, row["password_hash"]):
+                raise InvalidCredentialsError(str(user_id))
             cur.execute(
-                "UPDATE users SET totp_enabled = FALSE, totp_secret = NULL, "
+                "UPDATE users SET totp_enabled = FALSE, auth_version = auth_version + 1, totp_secret = NULL, "
                 "totp_last_used_step = NULL WHERE user_id = %s;",
                 (str(user_id),),
             )

@@ -1,17 +1,9 @@
-"""Refresh-token persistence and rotation (Sprint 7).
-
-Every refresh consumes the presented token and issues a new one. Presenting an
-already-consumed token means it leaked (the legitimate client would have moved
-on to its replacement), so the whole family is revoked and the user is forced to
-re-authenticate. This is the OWASP refresh-token-rotation pattern.
-"""
-
+"""Atomic refresh rotation and revocable sessions, serialized per user."""
 import logging
-from datetime import datetime
-from uuid import UUID
-
+from datetime import datetime, timedelta, timezone
+from uuid import UUID, uuid4
 from psycopg2.extras import RealDictCursor
-
+from app.core.config import settings
 from app.core.db import get_connection
 from app.core.security import generate_refresh_token, hash_refresh_token
 
@@ -19,192 +11,164 @@ logger = logging.getLogger(__name__)
 
 
 class InvalidRefreshTokenError(Exception):
-    """Raised when a refresh token is unknown, expired, or already consumed."""
+    pass
 
 
-def issue(
-    user_id: UUID,
-    replaces: UUID | None = None,
-    user_agent: str | None = None,
-    ip_address: str | None = None,
-    session_started_at: datetime | None = None,
-) -> str:
-    """Stores a new refresh token for `user_id` and returns the raw value.
+class ConcurrentRefreshError(Exception):
+    """A recently rotated cookie is in flight; retry with the browser's new cookie."""
 
-    `user_agent`/`ip_address` are best-effort request metadata, recorded so the
-    Security page's active-sessions list has a real device to show instead of
-    a placeholder — see migration 0013.
 
-    `session_started_at` is when the *session* (not this row) began. Leave it
-    unset for a fresh login/register — the column defaults to NOW(). A
-    rotation (`rotate()`, below) passes the predecessor's value through
-    unchanged, so every token in one `replaced_by` chain — and every reload,
-    since the access token is memory-only and a page load rotates — reports
-    the same sign-in time instead of creeping forward each rotation
-    (migration 0014).
-    """
-    raw, token_hash, expires_at = generate_refresh_token()
+def _lock_user(cur, user_id):
+    cur.execute("SELECT is_active, auth_version FROM users WHERE user_id = %s FOR UPDATE;", (str(user_id),))
+    return cur.fetchone()
+
+
+def _insert(cur, user_id, session_id, started, expires, user_agent, ip_address):
+    raw, token_hash, sliding_expiry = generate_refresh_token()
+    cur.execute("""INSERT INTO refresh_tokens
+        (user_id, token_hash, expires_at, user_agent, ip_address, session_started_at, session_id, session_expires_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING token_id;""",
+        (str(user_id), token_hash, min(sliding_expiry, expires), user_agent, ip_address, started, str(session_id), expires))
+    return raw, cur.fetchone()["token_id"]
+
+
+def issue(user_id: UUID, *, user_agent=None, ip_address=None, expected_auth_version=None) -> str:
     conn = get_connection()
     try:
         with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                INSERT INTO refresh_tokens
-                    (user_id, token_hash, expires_at, user_agent, ip_address, session_started_at)
-                VALUES (%s, %s, %s, %s, %s, COALESCE(%s, NOW()))
-                RETURNING token_id;
-                """,
-                (str(user_id), token_hash, expires_at, user_agent, ip_address, session_started_at),
-            )
-            new_id = cur.fetchone()["token_id"]
-            if replaces is not None:
-                # Link the chain so a reuse can be traced back to its family.
-                cur.execute(
-                    "UPDATE refresh_tokens SET replaced_by = %s WHERE token_id = %s;",
-                    (str(new_id), str(replaces)),
-                )
+            user = _lock_user(cur, user_id)
+            if not user or not user["is_active"] or (expected_auth_version is not None and user["auth_version"] != expected_auth_version):
+                raise InvalidRefreshTokenError("Credentials changed; sign in again.")
+            started = datetime.now(timezone.utc)
+            expires = started + timedelta(days=settings.session_absolute_expire_days)
+            raw, _ = _insert(cur, user_id, uuid4(), started, expires, user_agent, ip_address)
     finally:
         conn.close()
     return raw
 
 
-def rotate(
-    raw_token: str, user_agent: str | None = None, ip_address: str | None = None
-) -> tuple[UUID, str]:
-    """Consumes `raw_token` and returns (user_id, new_raw_token).
-
-    Raises InvalidRefreshTokenError if the token is unknown, expired, or has
-    already been consumed — the last case also revokes every other token for
-    that user, since a replayed token means it escaped the client.
-    """
-    token_hash = hash_refresh_token(raw_token)
+def session_for_token(raw_token: str) -> dict:
     conn = get_connection()
-    # Never raise inside the `with conn` block below: psycopg2 rolls the
-    # transaction back on exception, which would silently undo the family
-    # revocation this function performs. Collect the outcome, commit, then raise.
-    failure: str | None = None
-    reused_by: UUID | None = None
-    user_id: UUID | None = None
-    old_id: UUID | None = None
-    session_started_at: datetime | None = None
     try:
-        with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT token_id, user_id, revoked_at, expires_at < NOW() AS expired,
-                       session_started_at
-                FROM refresh_tokens WHERE token_hash = %s
-                FOR UPDATE;
-                """,
-                (token_hash,),
-            )
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT session_id, session_expires_at FROM refresh_tokens WHERE token_hash = %s;",
+                        (hash_refresh_token(raw_token),))
             row = cur.fetchone()
-
-            if row is None:
-                failure = "Unknown refresh token."
-            elif row["revoked_at"] is not None:
-                # Replay of a consumed token: assume compromise, drop the family.
-                cur.execute(
-                    "UPDATE refresh_tokens SET revoked_at = NOW() "
-                    "WHERE user_id = %s AND revoked_at IS NULL;",
-                    (str(row["user_id"]),),
-                )
-                reused_by = row["user_id"]
-                failure = "Refresh token already used."
-            elif row["expired"]:
-                failure = "Refresh token expired."
-            else:
-                cur.execute(
-                    "UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_id = %s;",
-                    (str(row["token_id"]),),
-                )
-                user_id = row["user_id"]
-                old_id = row["token_id"]
-                session_started_at = row["session_started_at"]
+            if not row:
+                raise InvalidRefreshTokenError("Unknown session.")
+            return dict(row)
     finally:
         conn.close()
 
-    if failure is not None:
-        if reused_by is not None:
-            logger.warning(
-                "Refresh token reuse detected for user %s — revoked all sessions",
-                reused_by,
-            )
-        raise InvalidRefreshTokenError(failure)
 
-    # Issued outside the transaction above so the consume is already committed.
-    return user_id, issue(
-        user_id,
-        replaces=old_id,
-        user_agent=user_agent,
-        ip_address=ip_address,
-        session_started_at=session_started_at,
-    )
+def rotate(raw_token: str, user_agent=None, ip_address=None) -> tuple[UUID, str]:
+    conn = get_connection()
+    failure = None
+    new_raw = None
+    user_id = None
+    try:
+        with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Discover owner without locking a token ahead of its user.
+            cur.execute("SELECT user_id FROM refresh_tokens WHERE token_hash = %s;", (hash_refresh_token(raw_token),))
+            owner = cur.fetchone()
+            if not owner:
+                failure = InvalidRefreshTokenError("Unknown refresh token.")
+            else:
+                user_id = owner["user_id"]
+                user = _lock_user(cur, user_id)
+                cur.execute("""SELECT *, expires_at <= NOW() OR session_expires_at <= NOW() AS expired,
+                    revoked_at > NOW() - (%s * INTERVAL '1 second') AS recently_rotated
+                    FROM refresh_tokens WHERE token_hash = %s FOR UPDATE;""",
+                    (settings.refresh_concurrency_seconds, hash_refresh_token(raw_token)))
+                row = cur.fetchone()
+                if not user or not user["is_active"] or not row:
+                    failure = InvalidRefreshTokenError("Inactive account.")
+                elif row["revoked_at"] is not None:
+                    # No credentials or cookies are returned during this bounded grace.
+                    # An explicitly revoked successor must never qualify as concurrency.
+                    cur.execute("SELECT 1 FROM refresh_tokens WHERE token_id = %s AND revoked_at IS NULL AND expires_at > NOW();",
+                                (str(row["replaced_by"]),) if row["replaced_by"] else (None,))
+                    successor_alive = cur.fetchone() is not None
+                    if row["recently_rotated"] and successor_alive:
+                        failure = ConcurrentRefreshError()
+                    else:
+                        if row["replaced_by"]:
+                            cur.execute("UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = %s AND revoked_at IS NULL;", (str(user_id),))
+                            logger.warning("Refresh token reuse detected for user %s", user_id)
+                        failure = InvalidRefreshTokenError("Refresh token already used.")
+                elif row["expired"]:
+                    failure = InvalidRefreshTokenError("Session expired.")
+                else:
+                    new_raw, new_id = _insert(cur, user_id, row["session_id"], row["session_started_at"],
+                                             row["session_expires_at"], user_agent, ip_address)
+                    cur.execute("UPDATE refresh_tokens SET revoked_at = NOW(), replaced_by = %s WHERE token_id = %s;",
+                                (str(new_id), str(row["token_id"])))
+        # Commit replay revocations before raising.
+    finally:
+        conn.close()
+    if failure is not None:
+        raise failure
+    return user_id, new_raw
+
+
+def is_active_session(user_id: UUID, session_id: UUID) -> bool:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT 1 FROM refresh_tokens WHERE user_id = %s AND session_id = %s
+                AND revoked_at IS NULL AND expires_at > NOW() AND session_expires_at > NOW() LIMIT 1;""",
+                (str(user_id), str(session_id)))
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
 
 
 def revoke(raw_token: str) -> None:
-    """Best-effort revoke of a single token (logout). Unknown tokens are a no-op
-    so logout stays idempotent and never leaks whether a token existed."""
-    conn = get_connection()
-    try:
-        with conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE refresh_tokens SET revoked_at = NOW() "
-                "WHERE token_hash = %s AND revoked_at IS NULL;",
-                (hash_refresh_token(raw_token),),
-            )
-    finally:
-        conn.close()
-
-
-def list_active(user_id: UUID, current_token_hash: str | None = None) -> list[dict]:
-    """Every live (unrevoked, unexpired) session for `user_id`, newest first.
-
-    `current_token_hash` marks which row is the caller's own cookie — the
-    Security page needs to badge that one as "Current" rather than guessing.
-    """
     conn = get_connection()
     try:
         with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT token_id, token_hash, user_agent, ip_address, session_started_at
-                FROM refresh_tokens
-                WHERE user_id = %s AND revoked_at IS NULL AND expires_at > NOW()
-                ORDER BY session_started_at DESC;
-                """,
-                (str(user_id),),
-            )
-            rows = cur.fetchall()
+            cur.execute("SELECT user_id, session_id FROM refresh_tokens WHERE token_hash = %s;", (hash_refresh_token(raw_token),))
+            row = cur.fetchone()
+            if row:
+                _lock_user(cur, row["user_id"])
+                cur.execute("UPDATE refresh_tokens SET revoked_at = NOW() WHERE session_id = %s AND revoked_at IS NULL;", (str(row["session_id"]),))
     finally:
         conn.close()
 
-    sessions = []
-    for row in rows:
-        sessions.append(
-            {
-                "token_id": row["token_id"],
-                "user_agent": row["user_agent"],
-                "ip_address": row["ip_address"],
-                # The session's sign-in time, not this row's own created_at —
-                # a rotated/reloaded token would otherwise creep forward.
-                "created_at": row["session_started_at"],
-                "is_current": row["token_hash"] == current_token_hash,
-            }
-        )
-    return sessions
+
+def revoke_session(user_id: UUID, session_id: UUID) -> bool:
+    conn = get_connection()
+    try:
+        with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            _lock_user(cur, user_id)
+            cur.execute("""UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = %s
+                AND session_id = %s AND revoked_at IS NULL;""", (str(user_id), str(session_id)))
+            return cur.rowcount > 0
+    finally:
+        conn.close()
 
 
 def revoke_all_for_user(user_id: UUID) -> int:
-    """Revokes every live token for a user. Returns how many were revoked."""
     conn = get_connection()
     try:
-        with conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE refresh_tokens SET revoked_at = NOW() "
-                "WHERE user_id = %s AND revoked_at IS NULL;",
-                (str(user_id),),
-            )
+        with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            _lock_user(cur, user_id)
+            cur.execute("UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = %s AND revoked_at IS NULL;", (str(user_id),))
             return cur.rowcount
+    finally:
+        conn.close()
+
+
+def list_active(user_id: UUID, current_token_hash=None) -> list[dict]:
+    conn = get_connection()
+    try:
+        with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT session_id, user_agent, ip_address, session_started_at,
+                session_id = (SELECT session_id FROM refresh_tokens WHERE token_hash = %s) AS is_current
+                FROM refresh_tokens WHERE user_id = %s AND revoked_at IS NULL
+                AND expires_at > NOW() AND session_expires_at > NOW() ORDER BY session_started_at DESC;""",
+                (current_token_hash, str(user_id)))
+            return [{"token_id": r["session_id"], "user_agent": r["user_agent"], "ip_address": r["ip_address"],
+                     "created_at": r["session_started_at"], "is_current": bool(r["is_current"])} for r in cur.fetchall()]
     finally:
         conn.close()
